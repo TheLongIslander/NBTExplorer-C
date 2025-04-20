@@ -8,6 +8,7 @@ INC_DIR = h
 
 SRC = $(wildcard $(SRC_DIR)/*.c)
 OBJ = $(SRC:$(SRC_DIR)/%.c=$(BIN_DIR)/%.o)
+ASM = $(SRC:$(SRC_DIR)/%.c=$(BIN_DIR)/%.s)
 
 EXE = $(BIN_DIR)/nbt_explorer
 
@@ -16,17 +17,17 @@ all: $(EXE)
 $(EXE): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-# Object file rule (bin/main.o from src/main.c)
+# Object file rule
 $(BIN_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Generate assembly (optional)
-asm:
-	@for file in $(SRC); do \
-		$(CC) $(CFLAGS) -S $$file -o $${file%.c}.s; \
-	done
+# Assembly generation
+asm: $(ASM)
+
+$(BIN_DIR)/%.s: $(SRC_DIR)/%.c
+	$(CC) $(CFLAGS) -S $< -o $@
 
 clean:
-	rm -f $(BIN_DIR)/*.o $(SRC_DIR)/*.s $(EXE)
+	rm -f $(BIN_DIR)/*.o $(BIN_DIR)/*.s $(EXE)
 
 .PHONY: all clean asm
