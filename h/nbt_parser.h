@@ -1,5 +1,5 @@
-#ifndef NBT_H
-#define NBT_H
+#ifndef NBT_PARSER_H
+#define NBT_PARSER_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -21,10 +21,5 @@ typedef enum {
 } TagType;
 
 void parse_nbt(const unsigned char* data, size_t* offset, int indent);
-
-uint8_t read_u8(const unsigned char* data, size_t* offset);
-uint16_t read_u16(const unsigned char* data, size_t* offset);
-int32_t read_i32(const unsigned char* data, size_t* offset);
-int64_t read_i64(const unsigned char* data, size_t* offset);
 
 #endif
