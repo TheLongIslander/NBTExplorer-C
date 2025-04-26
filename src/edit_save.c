@@ -1,25 +1,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <zlib.h> //REQUIRED for gzip writing
+#include <zlib.h> // REQUIRED for gzip writing
 #include "nbt_parser.h"
 #include "nbt_utils.h"
 
-// 🔧 Forward declarations
 static void write_payload(gzFile f, NBTTag* tag);
 void write_tag(gzFile f, NBTTag* tag);
 
 // Save a 2-byte length-prefixed string
 static void write_string(gzFile f, const char* str) {
-    if (!str) str = "";  // <-- Prevent crash if name is NULL
+    if (!str) str = "";
     uint16_t len = (uint16_t)strlen(str);
     uint8_t buf[2] = { (len >> 8) & 0xFF, len & 0xFF };
     gzwrite(f, buf, 2);
     gzwrite(f, str, len);
 }
 
-
 static void write_payload(gzFile f, NBTTag* tag) {
+    if (!tag) return; // SAFETY: avoid crash if NULL passed
+
     switch (tag->type) {
         case TAG_Byte:
             gzwrite(f, &tag->value.byte_val, 1);
@@ -87,7 +87,7 @@ static void write_payload(gzFile f, NBTTag* tag) {
                 len & 0xFF
             };
             gzwrite(f, len_buf, 4);
-            gzwrite(f, (const void*)tag->value.byte_array.data, len);
+            gzwrite(f, tag->value.byte_array.data, len);
             break;
         }
 
@@ -97,23 +97,36 @@ static void write_payload(gzFile f, NBTTag* tag) {
 
         case TAG_List: {
             gzputc(f, tag->value.list.element_type);
-            int32_t len = tag->value.list.count;
+
+            // Count only valid elements (non-NULL and matching element type)
+            int32_t real_count = 0;
+            for (int i = 0; i < tag->value.list.count; i++) {
+                if (tag->value.list.items[i] && tag->value.list.items[i]->type == tag->value.list.element_type) {
+                    real_count++;
+                }
+            }
+
             uint8_t len_buf[4] = {
-                (len >> 24) & 0xFF,
-                (len >> 16) & 0xFF,
-                (len >> 8) & 0xFF,
-                len & 0xFF
+                (real_count >> 24) & 0xFF,
+                (real_count >> 16) & 0xFF,
+                (real_count >> 8) & 0xFF,
+                real_count & 0xFF
             };
             gzwrite(f, len_buf, 4);
-            for (int i = 0; i < len; i++) {
-                write_payload(f, tag->value.list.items[i]);
+
+            for (int i = 0; i < tag->value.list.count; i++) {
+                if (tag->value.list.items[i] && tag->value.list.items[i]->type == tag->value.list.element_type) {
+                    write_payload(f, tag->value.list.items[i]);
+                }
             }
             break;
         }
 
         case TAG_Compound:
             for (int i = 0; i < tag->value.compound.count; i++) {
-                write_tag(f, tag->value.compound.items[i]);
+                if (tag->value.compound.items[i]) {
+                    write_tag(f, tag->value.compound.items[i]);
+                }
             }
             gzputc(f, TAG_End);
             break;
@@ -127,7 +140,7 @@ static void write_payload(gzFile f, NBTTag* tag) {
                 len & 0xFF
             };
             gzwrite(f, len_buf, 4);
-            gzwrite(f, (const void*)tag->value.int_array.data, len * sizeof(int32_t));
+            gzwrite(f, tag->value.int_array.data, len * sizeof(int32_t));
             break;
         }
 
@@ -140,7 +153,7 @@ static void write_payload(gzFile f, NBTTag* tag) {
                 len & 0xFF
             };
             gzwrite(f, len_buf, 4);
-            gzwrite(f, (const void*)tag->value.long_array.data, len * sizeof(int64_t));
+            gzwrite(f, tag->value.long_array.data, len * sizeof(int64_t));
             break;
         }
 
@@ -151,6 +164,7 @@ static void write_payload(gzFile f, NBTTag* tag) {
 }
 
 void write_tag(gzFile f, NBTTag* tag) {
+    if (!tag) return;
     gzputc(f, tag->type);
     if (tag->name) {
         write_string(f, tag->name);
@@ -160,9 +174,8 @@ void write_tag(gzFile f, NBTTag* tag) {
     write_payload(f, tag);
 }
 
-// Recursively find tag by path like Data/Difficulty
 NBTTag* find_tag_by_path(NBTTag* root, char* path) {
-    if (root->type != TAG_Compound) return NULL;
+    if (!root || root->type != TAG_Compound) return NULL;
 
     while (*path == '/') path++;
 
@@ -189,8 +202,7 @@ NBTTag* find_tag_by_path(NBTTag* root, char* path) {
 
         for (int i = 0; i < current->value.compound.count; i++) {
             NBTTag* child = current->value.compound.items[i];
-            printf("    → Checking child: \"%s\"\n", child->name);
-            if (strcmp(child->name, token) == 0) {
+            if (child && child->name && strcmp(child->name, token) == 0) {
                 printf("    ✔ Match found. Descending into: \"%s\"\n", token);
                 current = child;
                 found = 1;
@@ -206,6 +218,6 @@ NBTTag* find_tag_by_path(NBTTag* root, char* path) {
         token = strtok(NULL, "/");
     }
 
-    printf("[DEBUG] Target tag found: \"%s\" (type %d)\n", current->name, current->type);
+    printf("[DEBUG] Target tag found: \"%s\" (type %d)\n", current->name ? current->name : "(null)", current->type);
     return current;
 }

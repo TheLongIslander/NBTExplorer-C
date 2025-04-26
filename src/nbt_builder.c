@@ -7,6 +7,7 @@
 static char* read_nbt_name(const unsigned char* data, size_t* offset) {
     uint16_t len = read_u16(data, offset);
     char* str = malloc(len + 1);
+    if (!str) return NULL;
     memcpy(str, data + *offset, len);
     str[len] = '\0';
     *offset += len;
@@ -18,6 +19,8 @@ NBTTag* build_nbt_tree(const unsigned char* data, size_t* offset) {
     if (tag_type == TAG_End) return NULL;
 
     NBTTag* tag = malloc(sizeof(NBTTag));
+    if (!tag) return NULL;
+
     tag->type = tag_type;
     tag->name = read_nbt_name(data, offset);
 
@@ -49,8 +52,10 @@ NBTTag* build_nbt_tree(const unsigned char* data, size_t* offset) {
         case TAG_String: {
             uint16_t len = read_u16(data, offset);
             tag->value.string_val = malloc(len + 1);
-            memcpy(tag->value.string_val, data + *offset, len);
-            tag->value.string_val[len] = '\0';
+            if (tag->value.string_val) {
+                memcpy(tag->value.string_val, data + *offset, len);
+                tag->value.string_val[len] = '\0';
+            }
             *offset += len;
             break;
         }
@@ -58,7 +63,9 @@ NBTTag* build_nbt_tree(const unsigned char* data, size_t* offset) {
             int32_t len = read_i32(data, offset);
             tag->value.byte_array.length = len;
             tag->value.byte_array.data = malloc(len);
-            memcpy(tag->value.byte_array.data, data + *offset, len);
+            if (tag->value.byte_array.data) {
+                memcpy(tag->value.byte_array.data, data + *offset, len);
+            }
             *offset += len;
             break;
         }
@@ -66,8 +73,10 @@ NBTTag* build_nbt_tree(const unsigned char* data, size_t* offset) {
             int32_t len = read_i32(data, offset);
             tag->value.int_array.length = len;
             tag->value.int_array.data = malloc(len * sizeof(int32_t));
-            for (int i = 0; i < len; i++) {
-                tag->value.int_array.data[i] = read_i32(data, offset);
+            if (tag->value.int_array.data) {
+                for (int i = 0; i < len; i++) {
+                    tag->value.int_array.data[i] = read_i32(data, offset);
+                }
             }
             break;
         }
@@ -75,8 +84,10 @@ NBTTag* build_nbt_tree(const unsigned char* data, size_t* offset) {
             int32_t len = read_i32(data, offset);
             tag->value.long_array.length = len;
             tag->value.long_array.data = malloc(len * sizeof(int64_t));
-            for (int i = 0; i < len; i++) {
-                tag->value.long_array.data[i] = read_i64(data, offset);
+            if (tag->value.long_array.data) {
+                for (int i = 0; i < len; i++) {
+                    tag->value.long_array.data[i] = read_i64(data, offset);
+                }
             }
             break;
         }
@@ -103,12 +114,14 @@ NBTTag* build_nbt_tree(const unsigned char* data, size_t* offset) {
             int32_t count = read_i32(data, offset);
             tag->value.list.count = count;
             tag->value.list.element_type = elem_type;
-            tag->value.list.items = malloc(count * sizeof(NBTTag*));
+            tag->value.list.items = calloc(count, sizeof(NBTTag*)); // <-- calloc (sets NULLs!)
 
             for (int i = 0; i < count; i++) {
                 NBTTag* elem = malloc(sizeof(NBTTag));
+                if (!elem) continue;
+
                 elem->type = elem_type;
-                elem->name = strdup(""); // List elements are unnamed
+                elem->name = strdup(""); // Lists elements unnamed
 
                 switch (elem_type) {
                     case TAG_Byte:
@@ -138,22 +151,25 @@ NBTTag* build_nbt_tree(const unsigned char* data, size_t* offset) {
                     case TAG_String: {
                         uint16_t len = read_u16(data, offset);
                         elem->value.string_val = malloc(len + 1);
-                        memcpy(elem->value.string_val, data + *offset, len);
-                        elem->value.string_val[len] = '\0';
+                        if (elem->value.string_val) {
+                            memcpy(elem->value.string_val, data + *offset, len);
+                            elem->value.string_val[len] = '\0';
+                        }
                         *offset += len;
                         break;
                     }
                     case TAG_Compound:
-                        free(elem); // Transfer to recursive call
+                        free(elem); // We'll reassign below
                         elem = build_nbt_tree(data, offset);
                         break;
                     default:
-                        printf("[WARN] Unsupported list element type %d — skipping\n", elem_type);
+                        printf("[WARN] Unsupported list element type %d — skipping element\n", elem_type);
                         free(elem);
-                        continue;
+                        elem = NULL;
+                        break;
                 }
 
-                tag->value.list.items[i] = elem;
+                tag->value.list.items[i] = elem; // Safe even if elem == NULL
             }
             break;
         }
@@ -165,7 +181,6 @@ NBTTag* build_nbt_tree(const unsigned char* data, size_t* offset) {
 
     return tag;
 }
-
 
 void free_nbt_tree(NBTTag* tag) {
     if (!tag) return;
@@ -208,4 +223,3 @@ void free_nbt_tree(NBTTag* tag) {
 
     free(tag);
 }
-
