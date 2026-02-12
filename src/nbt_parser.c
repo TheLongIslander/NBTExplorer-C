@@ -1,139 +1,256 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "nbt_parser.h"
 #include "nbt_utils.h"
-#include "nbt_parser.h"
 
+static void parse_list_element(const unsigned char* data, size_t* offset, int indent, uint8_t elem_type);
 
 void parse_nbt(const unsigned char* data, size_t* offset, int indent) {
     uint8_t tag_type = read_u8(data, offset);
     if (tag_type == TAG_End) {
-        print_indent(indent); printf("TAG_End\n");
+        print_indent(indent);
+        printf("TAG_End\n");
         return;
     }
 
     uint16_t name_len = read_u16(data, offset);
-    char name[256] = {0};
+    char* name = malloc((size_t)name_len + 1);
+    if (!name) return;
     memcpy(name, data + *offset, name_len);
+    name[name_len] = '\0';
     *offset += name_len;
 
-    print_indent(indent); printf("Tag: %s (Type %02X)\n", name, tag_type);
+    print_indent(indent);
+    printf("Tag: %s (Type %02X)\n", name, tag_type);
+    free(name);
     indent++;
 
     switch (tag_type) {
         case TAG_Byte:
-            print_indent(indent); printf("Byte: %d\n", (int8_t)read_u8(data, offset));
+            print_indent(indent);
+            printf("Byte: %d\n", (int8_t)read_u8(data, offset));
             break;
+
         case TAG_Short:
-            print_indent(indent); printf("Short: %d\n", (int16_t)read_u16(data, offset));
+            print_indent(indent);
+            printf("Short: %d\n", (int16_t)read_u16(data, offset));
             break;
+
         case TAG_Int:
-            print_indent(indent); printf("Int: %d\n", read_i32(data, offset));
+            print_indent(indent);
+            printf("Int: %d\n", read_i32(data, offset));
             break;
+
         case TAG_Long:
-            print_indent(indent); printf("Long: %lld\n", (long long)read_i64(data, offset));
+            print_indent(indent);
+            printf("Long: %lld\n", (long long)read_i64(data, offset));
             break;
+
         case TAG_Float: {
-            union { uint32_t i; float f; } u;
-            u.i = read_i32(data, offset);
-            print_indent(indent); printf("Float: %f\n", u.f);
+            union {
+                uint32_t i;
+                float f;
+            } u;
+            u.i = (uint32_t)read_i32(data, offset);
+            print_indent(indent);
+            printf("Float: %f\n", u.f);
             break;
         }
+
         case TAG_Double: {
-            union { uint64_t i; double d; } u;
-            u.i = read_i64(data, offset);
-            print_indent(indent); printf("Double: %lf\n", u.d);
+            union {
+                uint64_t i;
+                double d;
+            } u;
+            u.i = (uint64_t)read_i64(data, offset);
+            print_indent(indent);
+            printf("Double: %lf\n", u.d);
             break;
         }
+
         case TAG_Byte_Array: {
             int32_t len = read_i32(data, offset);
-            print_indent(indent); printf("Byte_Array[%d]\n", len);
+            print_indent(indent);
+            printf("Byte_Array[%d]\n", len);
             *offset += len;
             break;
         }
+
         case TAG_String: {
             uint16_t len = read_u16(data, offset);
-            char str[512] = {0};
+            char* str = malloc((size_t)len + 1);
+            if (!str) return;
             memcpy(str, data + *offset, len);
+            str[len] = '\0';
             *offset += len;
-            print_indent(indent); printf("String: %s\n", str);
+            print_indent(indent);
+            printf("String: %s\n", str);
+            free(str);
             break;
         }
+
         case TAG_List: {
             uint8_t elem_type = read_u8(data, offset);
             int32_t count = read_i32(data, offset);
-            print_indent(indent); printf("List: Type %02X, Length %d\n", elem_type, count);
+            print_indent(indent);
+            printf("List: Type %02X, Length %d\n", elem_type, count);
+
             for (int i = 0; i < count; i++) {
-                print_indent(indent + 1); printf("[Element %d]\n", i);
-        
-                switch (elem_type) {
-                    case TAG_Byte:
-                        print_indent(indent + 2); printf("Byte: %d\n", (int8_t)read_u8(data, offset));
-                        break;
-                    case TAG_Short:
-                        print_indent(indent + 2); printf("Short: %d\n", (int16_t)read_u16(data, offset));
-                        break;
-                    case TAG_Int:
-                        print_indent(indent + 2); printf("Int: %d\n", read_i32(data, offset));
-                        break;
-                    case TAG_Long:
-                        print_indent(indent + 2); printf("Long: %lld\n", (long long)read_i64(data, offset));
-                        break;
-                    case TAG_Float: {
-                        union { uint32_t i; float f; } u;
-                        u.i = read_i32(data, offset);
-                        print_indent(indent + 2); printf("Float: %f\n", u.f);
-                        break;
-                    }
-                    case TAG_Double: {
-                        union { uint64_t i; double d; } u;
-                        u.i = read_i64(data, offset);
-                        print_indent(indent + 2); printf("Double: %lf\n", u.d);
-                        break;
-                    }
-                    case TAG_String: {
-                        uint16_t len = read_u16(data, offset);
-                        char str[512] = {0};
-                        memcpy(str, data + *offset, len);
-                        *offset += len;
-                        print_indent(indent + 2); printf("String: %s\n", str);
-                        break;
-                    }
-                    case TAG_Compound:
-                        parse_nbt(data, offset, indent + 2);
-                        break;
-                    default:
-                        print_indent(indent + 2); printf("[Unsupported element type %02X]\n", elem_type);
-                        return;
-                }
+                print_indent(indent + 1);
+                printf("[Element %d]\n", i);
+                parse_list_element(data, offset, indent + 2, elem_type);
             }
             break;
         }
+
         case TAG_Compound:
             while (1) {
                 uint8_t t = data[*offset];
                 if (t == TAG_End) {
                     read_u8(data, offset);
-                    print_indent(indent); printf("End Compound\n");
+                    print_indent(indent);
+                    printf("End Compound\n");
                     break;
                 }
                 parse_nbt(data, offset, indent);
             }
             break;
+
         case TAG_Int_Array: {
             int32_t len = read_i32(data, offset);
-            print_indent(indent); printf("Int_Array[%d]\n", len);
+            print_indent(indent);
+            printf("Int_Array[%d]\n", len);
             *offset += len * 4;
             break;
         }
+
         case TAG_Long_Array: {
             int32_t len = read_i32(data, offset);
-            print_indent(indent); printf("Long_Array[%d]\n", len);
+            print_indent(indent);
+            printf("Long_Array[%d]\n", len);
             *offset += len * 8;
             break;
         }
+
         default:
-            print_indent(indent); printf("Unknown tag type %02X\n", tag_type);
+            print_indent(indent);
+            printf("Unknown tag type %02X\n", tag_type);
+            break;
+    }
+}
+
+static void parse_list_element(const unsigned char* data, size_t* offset, int indent, uint8_t elem_type) {
+    switch (elem_type) {
+        case TAG_Byte:
+            print_indent(indent);
+            printf("Byte: %d\n", (int8_t)read_u8(data, offset));
+            break;
+
+        case TAG_Short:
+            print_indent(indent);
+            printf("Short: %d\n", (int16_t)read_u16(data, offset));
+            break;
+
+        case TAG_Int:
+            print_indent(indent);
+            printf("Int: %d\n", read_i32(data, offset));
+            break;
+
+        case TAG_Long:
+            print_indent(indent);
+            printf("Long: %lld\n", (long long)read_i64(data, offset));
+            break;
+
+        case TAG_Float: {
+            union {
+                uint32_t i;
+                float f;
+            } u;
+            u.i = (uint32_t)read_i32(data, offset);
+            print_indent(indent);
+            printf("Float: %f\n", u.f);
+            break;
+        }
+
+        case TAG_Double: {
+            union {
+                uint64_t i;
+                double d;
+            } u;
+            u.i = (uint64_t)read_i64(data, offset);
+            print_indent(indent);
+            printf("Double: %lf\n", u.d);
+            break;
+        }
+
+        case TAG_String: {
+            uint16_t len = read_u16(data, offset);
+            char* str = malloc((size_t)len + 1);
+            if (!str) return;
+            memcpy(str, data + *offset, len);
+            str[len] = '\0';
+            *offset += len;
+            print_indent(indent);
+            printf("String: %s\n", str);
+            free(str);
+            break;
+        }
+
+        case TAG_Byte_Array: {
+            int32_t len = read_i32(data, offset);
+            print_indent(indent);
+            printf("Byte_Array[%d]\n", len);
+            *offset += len;
+            break;
+        }
+
+        case TAG_Int_Array: {
+            int32_t len = read_i32(data, offset);
+            print_indent(indent);
+            printf("Int_Array[%d]\n", len);
+            *offset += len * 4;
+            break;
+        }
+
+        case TAG_Long_Array: {
+            int32_t len = read_i32(data, offset);
+            print_indent(indent);
+            printf("Long_Array[%d]\n", len);
+            *offset += len * 8;
+            break;
+        }
+
+        case TAG_List: {
+            uint8_t nested_type = read_u8(data, offset);
+            int32_t nested_count = read_i32(data, offset);
+            print_indent(indent);
+            printf("List: Type %02X, Length %d\n", nested_type, nested_count);
+
+            for (int i = 0; i < nested_count; i++) {
+                print_indent(indent + 1);
+                printf("[Element %d]\n", i);
+                parse_list_element(data, offset, indent + 2, nested_type);
+            }
+            break;
+        }
+
+        case TAG_Compound:
+            while (1) {
+                uint8_t t = data[*offset];
+                if (t == TAG_End) {
+                    read_u8(data, offset);
+                    print_indent(indent);
+                    printf("End Compound\n");
+                    break;
+                }
+                parse_nbt(data, offset, indent);
+            }
+            break;
+
+        default:
+            print_indent(indent);
+            printf("[Unsupported element type %02X]\n", elem_type);
             break;
     }
 }

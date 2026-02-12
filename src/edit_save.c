@@ -1,24 +1,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <zlib.h> // REQUIRED for gzip writing
-#include "nbt_parser.h"
-#include "nbt_utils.h"
+#include <zlib.h>
+#include "edit_path.h"
+#include "edit_save.h"
+#include "edit_value.h"
 
 static void write_payload(gzFile f, NBTTag* tag);
-void write_tag(gzFile f, NBTTag* tag);
 
-// Save a 2-byte length-prefixed string
 static void write_string(gzFile f, const char* str) {
     if (!str) str = "";
+
     uint16_t len = (uint16_t)strlen(str);
-    uint8_t buf[2] = { (len >> 8) & 0xFF, len & 0xFF };
+    uint8_t buf[2] = { (uint8_t)((len >> 8) & 0xFF), (uint8_t)(len & 0xFF) };
+
     gzwrite(f, buf, 2);
     gzwrite(f, str, len);
 }
 
 static void write_payload(gzFile f, NBTTag* tag) {
-    if (!tag) return; // SAFETY: avoid crash if NULL passed
+    if (!tag) return;
 
     switch (tag->type) {
         case TAG_Byte:
@@ -26,9 +27,10 @@ static void write_payload(gzFile f, NBTTag* tag) {
             break;
 
         case TAG_Short: {
+            int16_t v = tag->value.short_val;
             uint8_t buf[2] = {
-                (tag->value.short_val >> 8) & 0xFF,
-                tag->value.short_val & 0xFF
+                (uint8_t)((v >> 8) & 0xFF),
+                (uint8_t)(v & 0xFF)
             };
             gzwrite(f, buf, 2);
             break;
@@ -37,10 +39,10 @@ static void write_payload(gzFile f, NBTTag* tag) {
         case TAG_Int: {
             int32_t v = tag->value.int_val;
             uint8_t buf[4] = {
-                (v >> 24) & 0xFF,
-                (v >> 16) & 0xFF,
-                (v >> 8) & 0xFF,
-                v & 0xFF
+                (uint8_t)((v >> 24) & 0xFF),
+                (uint8_t)((v >> 16) & 0xFF),
+                (uint8_t)((v >> 8) & 0xFF),
+                (uint8_t)(v & 0xFF)
             };
             gzwrite(f, buf, 4);
             break;
@@ -49,31 +51,39 @@ static void write_payload(gzFile f, NBTTag* tag) {
         case TAG_Long: {
             int64_t v = tag->value.long_val;
             uint8_t buf[8];
-            for (int i = 0; i < 8; i++)
-                buf[7 - i] = (v >> (i * 8)) & 0xFF;
+            for (int i = 0; i < 8; i++) {
+                buf[7 - i] = (uint8_t)((v >> (i * 8)) & 0xFF);
+            }
             gzwrite(f, buf, 8);
             break;
         }
 
         case TAG_Float: {
-            union { float f; uint32_t i; } u;
+            union {
+                float f;
+                uint32_t i;
+            } u;
             u.f = tag->value.float_val;
             uint8_t buf[4] = {
-                (u.i >> 24) & 0xFF,
-                (u.i >> 16) & 0xFF,
-                (u.i >> 8) & 0xFF,
-                u.i & 0xFF
+                (uint8_t)((u.i >> 24) & 0xFF),
+                (uint8_t)((u.i >> 16) & 0xFF),
+                (uint8_t)((u.i >> 8) & 0xFF),
+                (uint8_t)(u.i & 0xFF)
             };
             gzwrite(f, buf, 4);
             break;
         }
 
         case TAG_Double: {
-            union { double d; uint64_t i; } u;
+            union {
+                double d;
+                uint64_t i;
+            } u;
             u.d = tag->value.double_val;
             uint8_t buf[8];
-            for (int i = 0; i < 8; i++)
-                buf[7 - i] = (u.i >> (i * 8)) & 0xFF;
+            for (int i = 0; i < 8; i++) {
+                buf[7 - i] = (uint8_t)((u.i >> (i * 8)) & 0xFF);
+            }
             gzwrite(f, buf, 8);
             break;
         }
@@ -81,13 +91,15 @@ static void write_payload(gzFile f, NBTTag* tag) {
         case TAG_Byte_Array: {
             int32_t len = tag->value.byte_array.length;
             uint8_t len_buf[4] = {
-                (len >> 24) & 0xFF,
-                (len >> 16) & 0xFF,
-                (len >> 8) & 0xFF,
-                len & 0xFF
+                (uint8_t)((len >> 24) & 0xFF),
+                (uint8_t)((len >> 16) & 0xFF),
+                (uint8_t)((len >> 8) & 0xFF),
+                (uint8_t)(len & 0xFF)
             };
             gzwrite(f, len_buf, 4);
-            gzwrite(f, tag->value.byte_array.data, len);
+            if (len > 0 && tag->value.byte_array.data) {
+                gzwrite(f, tag->value.byte_array.data, len);
+            }
             break;
         }
 
@@ -96,10 +108,11 @@ static void write_payload(gzFile f, NBTTag* tag) {
             break;
 
         case TAG_List: {
-            gzputc(f, tag->value.list.element_type);
-
-            // Count only valid elements (non-NULL and matching element type)
             int32_t real_count = 0;
+            uint8_t elem_type = (uint8_t)tag->value.list.element_type;
+
+            gzputc(f, elem_type);
+
             for (int i = 0; i < tag->value.list.count; i++) {
                 if (tag->value.list.items[i] && tag->value.list.items[i]->type == tag->value.list.element_type) {
                     real_count++;
@@ -107,10 +120,10 @@ static void write_payload(gzFile f, NBTTag* tag) {
             }
 
             uint8_t len_buf[4] = {
-                (real_count >> 24) & 0xFF,
-                (real_count >> 16) & 0xFF,
-                (real_count >> 8) & 0xFF,
-                real_count & 0xFF
+                (uint8_t)((real_count >> 24) & 0xFF),
+                (uint8_t)((real_count >> 16) & 0xFF),
+                (uint8_t)((real_count >> 8) & 0xFF),
+                (uint8_t)(real_count & 0xFF)
             };
             gzwrite(f, len_buf, 4);
 
@@ -134,90 +147,130 @@ static void write_payload(gzFile f, NBTTag* tag) {
         case TAG_Int_Array: {
             int32_t len = tag->value.int_array.length;
             uint8_t len_buf[4] = {
-                (len >> 24) & 0xFF,
-                (len >> 16) & 0xFF,
-                (len >> 8) & 0xFF,
-                len & 0xFF
+                (uint8_t)((len >> 24) & 0xFF),
+                (uint8_t)((len >> 16) & 0xFF),
+                (uint8_t)((len >> 8) & 0xFF),
+                (uint8_t)(len & 0xFF)
             };
             gzwrite(f, len_buf, 4);
-            gzwrite(f, tag->value.int_array.data, len * sizeof(int32_t));
+            for (int32_t i = 0; i < len; i++) {
+                int32_t v = tag->value.int_array.data[i];
+                uint8_t buf[4] = {
+                    (uint8_t)((v >> 24) & 0xFF),
+                    (uint8_t)((v >> 16) & 0xFF),
+                    (uint8_t)((v >> 8) & 0xFF),
+                    (uint8_t)(v & 0xFF)
+                };
+                gzwrite(f, buf, 4);
+            }
             break;
         }
 
         case TAG_Long_Array: {
             int32_t len = tag->value.long_array.length;
             uint8_t len_buf[4] = {
-                (len >> 24) & 0xFF,
-                (len >> 16) & 0xFF,
-                (len >> 8) & 0xFF,
-                len & 0xFF
+                (uint8_t)((len >> 24) & 0xFF),
+                (uint8_t)((len >> 16) & 0xFF),
+                (uint8_t)((len >> 8) & 0xFF),
+                (uint8_t)(len & 0xFF)
             };
             gzwrite(f, len_buf, 4);
-            gzwrite(f, tag->value.long_array.data, len * sizeof(int64_t));
+            for (int32_t i = 0; i < len; i++) {
+                int64_t v = tag->value.long_array.data[i];
+                uint8_t buf[8];
+                for (int b = 0; b < 8; b++) {
+                    buf[7 - b] = (uint8_t)((v >> (b * 8)) & 0xFF);
+                }
+                gzwrite(f, buf, 8);
+            }
             break;
         }
 
         default:
-            printf("[WARN] Unsupported tag type %d — skipped\n", tag->type);
             break;
     }
 }
 
 void write_tag(gzFile f, NBTTag* tag) {
     if (!tag) return;
+
     gzputc(f, tag->type);
-    if (tag->name) {
-        write_string(f, tag->name);
-    } else {
-        write_string(f, "");  // fallback for unnamed root tag
-    }
+    write_string(f, tag->name ? tag->name : "");
     write_payload(f, tag);
 }
 
-NBTTag* find_tag_by_path(NBTTag* root, char* path) {
-    if (!root || root->type != TAG_Compound) return NULL;
+const char* edit_status_name(EditStatus status) {
+    switch (status) {
+        case EDIT_OK:
+            return "ok";
+        case EDIT_ERR_PATH_SYNTAX:
+            return "invalid path syntax";
+        case EDIT_ERR_PATH_NOT_FOUND:
+            return "path not found";
+        case EDIT_ERR_INDEX_BOUNDS:
+            return "index out of bounds";
+        case EDIT_ERR_TYPE_MISMATCH:
+            return "type mismatch";
+        case EDIT_ERR_INVALID_JSON:
+            return "invalid json";
+        case EDIT_ERR_NUMERIC_RANGE:
+            return "numeric overflow";
+        case EDIT_ERR_UNSUPPORTED:
+            return "unsupported operation";
+        case EDIT_ERR_MEMORY:
+            return "out of memory";
+        default:
+            return "unknown edit error";
+    }
+}
 
-    while (*path == '/') path++;
+NBTTag* find_tag_by_path(NBTTag* root, const char* path) {
+    PathTarget target;
+    char err[128];
 
-    NBTTag* current = root;
-    char path_copy[512];
-    snprintf(path_copy, sizeof(path_copy), "%s", path);
-
-    printf("[DEBUG] Walking path: %s\n", path_copy);
-    char* token = strtok(path_copy, "/");
-
-    if (token && (strcmp(token, root->name) == 0 || strcmp(token, "") == 0)) {
-        printf("[DEBUG] Skipping root token: \"%s\"\n", token);
-        token = strtok(NULL, "/");
+    if (resolve_edit_path(root, path, &target, err, sizeof(err)) != EDIT_OK) {
+        return NULL;
     }
 
-    while (token) {
-        printf("[DEBUG] Looking for token: \"%s\" in current compound (%s)\n", token, current->name ? current->name : "");
+    if (target.kind == PATH_TARGET_TAG) {
+        return target.tag;
+    }
 
-        int found = 0;
-        if (current->type != TAG_Compound) {
-            printf("[DEBUG] Current tag is not a compound. Aborting.\n");
-            return NULL;
-        }
+    if (target.kind == PATH_TARGET_LIST_ELEMENT) {
+        if (!target.tag || target.tag->type != TAG_List) return NULL;
+        if (target.index < 0 || target.index >= target.tag->value.list.count) return NULL;
+        return target.tag->value.list.items[target.index];
+    }
 
-        for (int i = 0; i < current->value.compound.count; i++) {
-            NBTTag* child = current->value.compound.items[i];
-            if (child && child->name && strcmp(child->name, token) == 0) {
-                printf("    ✔ Match found. Descending into: \"%s\"\n", token);
-                current = child;
-                found = 1;
-                break;
+    return NULL;
+}
+
+EditStatus edit_tag_by_path(NBTTag* root, const char* path, const char* value_expr, char* err, size_t err_sz) {
+    PathTarget target;
+    EditStatus st;
+
+    st = resolve_edit_path(root, path, &target, err, err_sz);
+    if (st != EDIT_OK) return st;
+
+    switch (target.kind) {
+        case PATH_TARGET_TAG:
+            if (target.tag->type == TAG_Compound) {
+                return apply_json_patch_to_compound(target.tag, value_expr, err, err_sz);
             }
-        }
+            return parse_json_for_tag_type(target.tag, value_expr, err, err_sz);
 
-        if (!found) {
-            printf("    ✘ Token not found: \"%s\"\n", token);
-            return NULL;
-        }
+        case PATH_TARGET_LIST_ELEMENT:
+            return parse_json_for_list_element(target.tag, target.index, value_expr, err, err_sz);
 
-        token = strtok(NULL, "/");
+        case PATH_TARGET_BYTE_ARRAY_ELEMENT:
+        case PATH_TARGET_INT_ARRAY_ELEMENT:
+        case PATH_TARGET_LONG_ARRAY_ELEMENT:
+            return parse_json_for_array_element(target.tag, target.index, value_expr, err, err_sz);
+
+        default:
+            if (err && err_sz > 0) {
+                snprintf(err, err_sz, "unsupported path target kind");
+            }
+            return EDIT_ERR_UNSUPPORTED;
     }
-
-    printf("[DEBUG] Target tag found: \"%s\" (type %d)\n", current->name ? current->name : "(null)", current->type);
-    return current;
 }

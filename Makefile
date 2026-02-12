@@ -27,7 +27,10 @@ asm: $(ASM)
 $(BIN_DIR)/%.s: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -S $< -o $@
 
+test: $(EXE)
+	./tests/run_edit_tests.sh
+
 clean:
 	rm -f $(BIN_DIR)/*.o $(BIN_DIR)/*.s $(EXE)
 
-.PHONY: all clean asm
+.PHONY: all clean asm test
