@@ -108,39 +108,39 @@ expect_delete_fail() {
   assert_grep "$pattern" "$TMP_DIR/last_delete_fail.log"
 }
 
-echo "[1/20] Numeric backward compatibility"
+echo "[1/23] Numeric backward compatibility"
 run_edit "Data/SpawnX" "1234"
 dump_modified
 assert_grep "Int: 1234" "$TMP_DIR/dump.txt"
 
-echo "[2/20] String edit"
+echo "[2/23] String edit"
 run_edit "Data/LevelName" '"world2"'
 dump_modified
 assert_grep "String: world2" "$TMP_DIR/dump.txt"
 
-echo "[3/20] List element edit"
+echo "[3/23] List element edit"
 run_edit "Data/Player/Pos[1]" "70.0"
 dump_modified
 assert_grep "Double: 70\\.000000" "$TMP_DIR/dump.txt"
 
-echo "[4/20] List whole replace"
+echo "[4/23] List whole replace"
 run_edit "Data/DataPacks/Enabled" '["vanilla","fabric"]'
 dump_modified
 assert_grep "String: vanilla" "$TMP_DIR/dump.txt"
 assert_grep "String: fabric" "$TMP_DIR/dump.txt"
 assert_not_grep "String: file/bukkit" "$TMP_DIR/dump.txt"
 
-echo "[5/20] Int array element edit"
+echo "[5/23] Int array element edit"
 run_edit "Data/Player/UUID[0]" "42"
 dump_modified
 assert_grep "Tag: UUID \(Type 0B\)" "$TMP_DIR/dump.txt"
 
-echo "[6/20] Int array whole replace"
+echo "[6/23] Int array whole replace"
 run_edit "Data/Player/UUID" "[1,2,3,4,5]"
 dump_modified
 assert_grep "Int_Array\[5\]" "$TMP_DIR/dump.txt"
 
-echo "[7/20] Compound patch"
+echo "[7/23] Compound patch"
 run_edit "Data" '{"SpawnX":1200,"LevelName":"world3"}'
 dump_modified
 assert_grep "Int: 1200" "$TMP_DIR/dump.txt"
@@ -153,25 +153,25 @@ assert_grep "String: world3" "$TMP_DIR/dump.txt"
 # run_edit "Some/ByteArrayPath" "[1,2,3]"
 # run_edit "Some/LongArrayPath" "[1,2,3]"
 
-echo "[8/20] Error: index out of bounds"
+echo "[8/23] Error: index out of bounds"
 expect_edit_fail "Data/Player/UUID[99]" "1" "index out of bounds"
 
-echo "[9/20] Error: wrong JSON type"
+echo "[9/23] Error: wrong JSON type"
 expect_edit_fail "Data/SpawnX" '"bad"' "type mismatch"
 
-echo "[10/20] Error: unknown compound key"
+echo "[10/23] Error: unknown compound key"
 expect_edit_fail "Data" '{"Nope":1}' "unknown compound key"
 
-echo "[11/20] Error: numeric overflow"
+echo "[11/23] Error: numeric overflow"
 expect_edit_fail "Data/SpawnX" "999999999999999999999" "numeric overflow"
 
-echo "[12/20] Custom output path"
+echo "[12/23] Custom output path"
 CUSTOM_OUT="$TMP_DIR/custom_output.dat"
 "$BIN" "$INPUT" --edit "Data/SpawnX" "2222" --output "$CUSTOM_OUT" >"$TMP_DIR/custom_output_edit.log" 2>&1
 "$BIN" "$CUSTOM_OUT" --dump "$TMP_DIR/custom_output_dump.txt" >"$TMP_DIR/custom_output_dump.log" 2>&1
 assert_grep "Int: 2222" "$TMP_DIR/custom_output_dump.txt"
 
-echo "[13/20] In-place edit with backup"
+echo "[13/23] In-place edit with backup"
 INPLACE_INPUT="$TMP_DIR/inplace_level.dat"
 cp "$INPUT" "$INPLACE_INPUT"
 "$BIN" "$INPLACE_INPUT" --edit "Data/SpawnX" "3333" --in-place --backup=.orig >"$TMP_DIR/inplace_edit.log" 2>&1
@@ -186,18 +186,18 @@ fi
 "$BIN" "$INPLACE_INPUT" --dump "$TMP_DIR/inplace_dump.txt" >"$TMP_DIR/inplace_dump.log" 2>&1
 assert_grep "Int: 3333" "$TMP_DIR/inplace_dump.txt"
 
-echo "[14/20] Set creates new tag"
+echo "[14/23] Set creates new tag"
 run_set "Data/CodexSetInt" "4444"
 dump_modified
 assert_grep "Tag: CodexSetInt \(Type 03\)" "$TMP_DIR/dump.txt"
 assert_grep "Int: 4444" "$TMP_DIR/dump.txt"
 
-echo "[15/20] Set updates existing tag"
+echo "[15/23] Set updates existing tag"
 run_set "Data/SpawnX" "5555"
 dump_modified
 assert_grep "Int: 5555" "$TMP_DIR/dump.txt"
 
-echo "[16/20] Set creates nested compound"
+echo "[16/23] Set creates nested compound"
 run_set "Data/CodexMeta" '{"Build":1,"Name":"codex"}'
 dump_modified
 assert_grep "Tag: CodexMeta \(Type 0A\)" "$TMP_DIR/dump.txt"
@@ -205,7 +205,7 @@ assert_grep "Tag: Build \(Type 03\)" "$TMP_DIR/dump.txt"
 assert_grep "Tag: Name \(Type 08\)" "$TMP_DIR/dump.txt"
 assert_grep "String: codex" "$TMP_DIR/dump.txt"
 
-echo "[17/20] Delete removes created tag"
+echo "[17/23] Delete removes created tag"
 DELETE_INPUT="$TMP_DIR/delete_level.dat"
 cp "$INPUT" "$DELETE_INPUT"
 "$BIN" "$DELETE_INPUT" --set "Data/ToDelete" "8888" --in-place >"$TMP_DIR/delete_set.log" 2>&1
@@ -213,7 +213,7 @@ cp "$INPUT" "$DELETE_INPUT"
 "$BIN" "$DELETE_INPUT" --dump "$TMP_DIR/delete_dump.txt" >"$TMP_DIR/delete_dump.log" 2>&1
 assert_not_grep "Tag: ToDelete \(Type 03\)" "$TMP_DIR/delete_dump.txt"
 
-echo "[18/20] Delete removes list element"
+echo "[18/23] Delete removes list element"
 DELETE_LIST_INPUT="$TMP_DIR/delete_list_level.dat"
 cp "$INPUT" "$DELETE_LIST_INPUT"
 "$BIN" "$DELETE_LIST_INPUT" --set "Data/DataPacks/Enabled" '["codex-delete-a","codex-delete-b"]' --in-place >"$TMP_DIR/delete_list_set.log" 2>&1
@@ -222,10 +222,39 @@ cp "$INPUT" "$DELETE_LIST_INPUT"
 assert_not_grep "String: codex-delete-a" "$TMP_DIR/delete_list_dump.txt"
 assert_grep "String: codex-delete-b" "$TMP_DIR/delete_list_dump.txt"
 
-echo "[19/20] Error: set with missing parent"
+echo "[19/23] Error: set with missing parent"
 expect_set_fail "Data/NoSuchParent/NewKey" "1" "path not found"
 
-echo "[20/20] Error: delete missing path"
+echo "[20/23] Error: delete missing path"
 expect_delete_fail "Data/NoSuchKey" "path not found"
+
+echo "[21/23] Quoted key path create and edit"
+QUOTED_INPUT="$TMP_DIR/quoted_path_level.dat"
+cp "$INPUT" "$QUOTED_INPUT"
+"$BIN" "$QUOTED_INPUT" --set 'Data/"Codex/Key"' "101" --in-place >"$TMP_DIR/quoted_set.log" 2>&1
+"$BIN" "$QUOTED_INPUT" --dump "$TMP_DIR/quoted_dump_1.txt" >"$TMP_DIR/quoted_dump_1.log" 2>&1
+assert_grep "Tag: Codex/Key \(Type 03\)" "$TMP_DIR/quoted_dump_1.txt"
+"$BIN" "$QUOTED_INPUT" --edit 'Data/"Codex/Key"' "202" --in-place >"$TMP_DIR/quoted_edit.log" 2>&1
+"$BIN" "$QUOTED_INPUT" --dump "$TMP_DIR/quoted_dump_2.txt" >"$TMP_DIR/quoted_dump_2.log" 2>&1
+assert_grep "Int: 202" "$TMP_DIR/quoted_dump_2.txt"
+
+echo "[22/23] Wildcard list edit"
+WILDCARD_EDIT_INPUT="$TMP_DIR/wildcard_edit_level.dat"
+cp "$INPUT" "$WILDCARD_EDIT_INPUT"
+"$BIN" "$WILDCARD_EDIT_INPUT" --set "Data/DataPacks/Enabled" '["codex-wild-a","codex-wild-b"]' --in-place >"$TMP_DIR/wildcard_edit_set.log" 2>&1
+"$BIN" "$WILDCARD_EDIT_INPUT" --edit "Data/DataPacks/Enabled[*]" '"codex-wild-all"' --in-place >"$TMP_DIR/wildcard_edit_cmd.log" 2>&1
+"$BIN" "$WILDCARD_EDIT_INPUT" --dump "$TMP_DIR/wildcard_edit_dump.txt" >"$TMP_DIR/wildcard_edit_dump.log" 2>&1
+assert_not_grep "String: codex-wild-a$" "$TMP_DIR/wildcard_edit_dump.txt"
+assert_not_grep "String: codex-wild-b$" "$TMP_DIR/wildcard_edit_dump.txt"
+assert_grep "String: codex-wild-all" "$TMP_DIR/wildcard_edit_dump.txt"
+
+echo "[23/23] Wildcard delete list elements"
+WILDCARD_DELETE_INPUT="$TMP_DIR/wildcard_delete_level.dat"
+cp "$INPUT" "$WILDCARD_DELETE_INPUT"
+"$BIN" "$WILDCARD_DELETE_INPUT" --set "Data/DataPacks/Enabled" '["codex-del-a","codex-del-b"]' --in-place >"$TMP_DIR/wildcard_delete_set.log" 2>&1
+"$BIN" "$WILDCARD_DELETE_INPUT" --delete "Data/DataPacks/Enabled[*]" --in-place >"$TMP_DIR/wildcard_delete_cmd.log" 2>&1
+"$BIN" "$WILDCARD_DELETE_INPUT" --dump "$TMP_DIR/wildcard_delete_dump.txt" >"$TMP_DIR/wildcard_delete_dump.log" 2>&1
+assert_not_grep "String: codex-del-a" "$TMP_DIR/wildcard_delete_dump.txt"
+assert_not_grep "String: codex-del-b" "$TMP_DIR/wildcard_delete_dump.txt"
 
 echo "All edit tests passed"

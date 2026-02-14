@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
@@ -231,32 +232,6 @@ static void set_err(char* err, size_t err_sz, const char* msg) {
     }
 }
 
-static NBTTag* path_target_to_tag(const PathTarget* target, char* err, size_t err_sz) {
-    if (!target) {
-        set_err(err, err_sz, "invalid path target");
-        return NULL;
-    }
-
-    if (target->kind == PATH_TARGET_TAG) {
-        return target->tag;
-    }
-
-    if (target->kind == PATH_TARGET_LIST_ELEMENT) {
-        if (!target->tag || target->tag->type != TAG_List) {
-            set_err(err, err_sz, "type mismatch: path does not resolve to a tag");
-            return NULL;
-        }
-        if (target->index < 0 || target->index >= target->tag->value.list.count) {
-            set_err(err, err_sz, "index out of bounds");
-            return NULL;
-        }
-        return target->tag->value.list.items[target->index];
-    }
-
-    set_err(err, err_sz, "type mismatch: path does not resolve to a tag");
-    return NULL;
-}
-
 static NBTTag* find_child_by_name(NBTTag* compound, const char* name, int* out_index) {
     if (!compound || compound->type != TAG_Compound || !name) return NULL;
 
@@ -318,132 +293,6 @@ static void remove_compound_child_at(NBTTag* compound, int index) {
     if (new_items) {
         compound->value.compound.items = new_items;
     }
-}
-
-static EditStatus split_parent_and_key(NBTTag* root, const char* path, char** out_parent_path, char** out_key, char* err, size_t err_sz) {
-    char* copy;
-    char* save;
-    char* tok;
-    char* segments[256];
-    int count = 0;
-    int start = 0;
-    char* parent_path = NULL;
-    char* key = NULL;
-
-    if (!root || !path || !out_parent_path || !out_key) {
-        set_err(err, err_sz, "invalid path argument");
-        return EDIT_ERR_PATH_SYNTAX;
-    }
-
-    *out_parent_path = NULL;
-    *out_key = NULL;
-
-    copy = strdup(path);
-    if (!copy) {
-        set_err(err, err_sz, "out of memory");
-        return EDIT_ERR_MEMORY;
-    }
-
-    for (tok = strtok_r(copy, "/", &save); tok; tok = strtok_r(NULL, "/", &save)) {
-        if (tok[0] == '\0') continue;
-        if (count >= (int)(sizeof(segments) / sizeof(segments[0]))) {
-            free(copy);
-            set_err(err, err_sz, "invalid path syntax: too many segments");
-            return EDIT_ERR_PATH_SYNTAX;
-        }
-        segments[count++] = tok;
-    }
-
-    if (count == 0) {
-        free(copy);
-        set_err(err, err_sz, "invalid path syntax");
-        return EDIT_ERR_PATH_SYNTAX;
-    }
-
-    if (root->name && root->name[0] != '\0' && strcmp(segments[0], root->name) == 0) {
-        start = 1;
-    }
-
-    if (start >= count) {
-        free(copy);
-        set_err(err, err_sz, "unsupported operation: cannot target root path");
-        return EDIT_ERR_UNSUPPORTED;
-    }
-
-    if (strchr(segments[count - 1], '[') || strchr(segments[count - 1], ']')) {
-        free(copy);
-        set_err(err, err_sz, "unsupported operation: create/delete requires a named tag path");
-        return EDIT_ERR_UNSUPPORTED;
-    }
-
-    key = strdup(segments[count - 1]);
-    if (!key) {
-        free(copy);
-        set_err(err, err_sz, "out of memory");
-        return EDIT_ERR_MEMORY;
-    }
-
-    if (count - start > 1) {
-        size_t len = 0;
-        size_t pos = 0;
-
-        for (int i = start; i < count - 1; i++) {
-            len += strlen(segments[i]) + 1;
-        }
-
-        parent_path = malloc(len + 1);
-        if (!parent_path) {
-            free(key);
-            free(copy);
-            set_err(err, err_sz, "out of memory");
-            return EDIT_ERR_MEMORY;
-        }
-
-        parent_path[0] = '\0';
-        for (int i = start; i < count - 1; i++) {
-            size_t slen = strlen(segments[i]);
-            memcpy(parent_path + pos, segments[i], slen);
-            pos += slen;
-            if (i < count - 2) {
-                parent_path[pos++] = '/';
-            }
-        }
-        parent_path[pos] = '\0';
-    }
-
-    *out_parent_path = parent_path;
-    *out_key = key;
-    free(copy);
-    return EDIT_OK;
-}
-
-static EditStatus resolve_parent_compound(NBTTag* root, const char* parent_path, NBTTag** out_parent, char* err, size_t err_sz) {
-    PathTarget target;
-    NBTTag* parent;
-    EditStatus st;
-
-    if (!root || !out_parent) {
-        set_err(err, err_sz, "invalid parent resolution");
-        return EDIT_ERR_PATH_SYNTAX;
-    }
-
-    if (!parent_path || parent_path[0] == '\0') {
-        parent = root;
-    } else {
-        st = resolve_edit_path(root, parent_path, &target, err, err_sz);
-        if (st != EDIT_OK) return st;
-
-        parent = path_target_to_tag(&target, err, err_sz);
-        if (!parent) return EDIT_ERR_TYPE_MISMATCH;
-    }
-
-    if (parent->type != TAG_Compound) {
-        set_err(err, err_sz, "type mismatch: parent path is not a compound");
-        return EDIT_ERR_TYPE_MISMATCH;
-    }
-
-    *out_parent = parent;
-    return EDIT_OK;
 }
 
 static EditStatus delete_list_element(NBTTag* list_tag, int index, char* err, size_t err_sz) {
@@ -589,6 +438,89 @@ static EditStatus delete_array_element(NBTTag* array_tag, int index, char* err, 
     }
 }
 
+static EditStatus edit_single_target(const PathTarget* target, const char* value_expr, char* err, size_t err_sz) {
+    switch (target->kind) {
+        case PATH_TARGET_TAG:
+            if (target->tag->type == TAG_Compound) {
+                return apply_json_patch_to_compound(target->tag, value_expr, err, err_sz);
+            }
+            return parse_json_for_tag_type(target->tag, value_expr, err, err_sz);
+
+        case PATH_TARGET_LIST_ELEMENT:
+            return parse_json_for_list_element(target->tag, target->index, value_expr, err, err_sz);
+
+        case PATH_TARGET_BYTE_ARRAY_ELEMENT:
+        case PATH_TARGET_INT_ARRAY_ELEMENT:
+        case PATH_TARGET_LONG_ARRAY_ELEMENT:
+            return parse_json_for_array_element(target->tag, target->index, value_expr, err, err_sz);
+
+        default:
+            set_err(err, err_sz, "unsupported path target kind");
+            return EDIT_ERR_UNSUPPORTED;
+    }
+}
+
+static uintptr_t delete_container_key(const PathTarget* t) {
+    if (!t) return 0;
+    if (t->kind == PATH_TARGET_TAG) return (uintptr_t)t->parent;
+    return (uintptr_t)t->tag;
+}
+
+static int compare_delete_targets(const void* a, const void* b) {
+    const PathTarget* ta = (const PathTarget*)a;
+    const PathTarget* tb = (const PathTarget*)b;
+    uintptr_t ca = delete_container_key(ta);
+    uintptr_t cb = delete_container_key(tb);
+
+    if (ca < cb) return -1;
+    if (ca > cb) return 1;
+
+    if ((int)ta->kind < (int)tb->kind) return -1;
+    if ((int)ta->kind > (int)tb->kind) return 1;
+
+    if (ta->index > tb->index) return -1;
+    if (ta->index < tb->index) return 1;
+    return 0;
+}
+
+static EditStatus delete_single_target(const PathTarget* target, NBTTag* root, char* err, size_t err_sz) {
+    switch (target->kind) {
+        case PATH_TARGET_LIST_ELEMENT:
+            return delete_list_element(target->tag, target->index, err, err_sz);
+
+        case PATH_TARGET_BYTE_ARRAY_ELEMENT:
+        case PATH_TARGET_INT_ARRAY_ELEMENT:
+        case PATH_TARGET_LONG_ARRAY_ELEMENT:
+            return delete_array_element(target->tag, target->index, err, err_sz);
+
+        case PATH_TARGET_TAG:
+            if (target->tag == root || !target->parent) {
+                set_err(err, err_sz, "unsupported operation: cannot delete root tag");
+                return EDIT_ERR_UNSUPPORTED;
+            }
+
+            if (target->parent->type == TAG_Compound) {
+                if (target->index < 0 || target->index >= target->parent->value.compound.count) {
+                    set_err(err, err_sz, "path not found");
+                    return EDIT_ERR_PATH_NOT_FOUND;
+                }
+                remove_compound_child_at(target->parent, target->index);
+                return EDIT_OK;
+            }
+
+            if (target->parent->type == TAG_List) {
+                return delete_list_element(target->parent, target->index, err, err_sz);
+            }
+
+            set_err(err, err_sz, "unsupported operation");
+            return EDIT_ERR_UNSUPPORTED;
+
+        default:
+            set_err(err, err_sz, "unsupported operation");
+            return EDIT_ERR_UNSUPPORTED;
+    }
+}
+
 NBTTag* find_tag_by_path(NBTTag* root, const char* path) {
     PathTarget target;
     char err[128];
@@ -611,38 +543,27 @@ NBTTag* find_tag_by_path(NBTTag* root, const char* path) {
 }
 
 EditStatus edit_tag_by_path(NBTTag* root, const char* path, const char* value_expr, char* err, size_t err_sz) {
-    PathTarget target;
+    PathTarget* targets = NULL;
+    size_t count = 0;
     EditStatus st;
 
-    st = resolve_edit_path(root, path, &target, err, err_sz);
+    st = resolve_edit_paths(root, path, &targets, &count, err, err_sz);
     if (st != EDIT_OK) return st;
 
-    switch (target.kind) {
-        case PATH_TARGET_TAG:
-            if (target.tag->type == TAG_Compound) {
-                return apply_json_patch_to_compound(target.tag, value_expr, err, err_sz);
-            }
-            return parse_json_for_tag_type(target.tag, value_expr, err, err_sz);
-
-        case PATH_TARGET_LIST_ELEMENT:
-            return parse_json_for_list_element(target.tag, target.index, value_expr, err, err_sz);
-
-        case PATH_TARGET_BYTE_ARRAY_ELEMENT:
-        case PATH_TARGET_INT_ARRAY_ELEMENT:
-        case PATH_TARGET_LONG_ARRAY_ELEMENT:
-            return parse_json_for_array_element(target.tag, target.index, value_expr, err, err_sz);
-
-        default:
-            if (err && err_sz > 0) {
-                snprintf(err, err_sz, "unsupported path target kind");
-            }
-            return EDIT_ERR_UNSUPPORTED;
+    for (size_t i = 0; i < count; i++) {
+        st = edit_single_target(&targets[i], value_expr, err, err_sz);
+        if (st != EDIT_OK) {
+            free_edit_paths(targets);
+            return st;
+        }
     }
+
+    free_edit_paths(targets);
+    return EDIT_OK;
 }
 
 EditStatus set_tag_by_path(NBTTag* root, const char* path, const char* value_expr, char* err, size_t err_sz) {
     EditStatus st;
-    char* parent_path = NULL;
     char* key = NULL;
     NBTTag* parent = NULL;
     NBTTag* existing = NULL;
@@ -652,10 +573,7 @@ EditStatus set_tag_by_path(NBTTag* root, const char* path, const char* value_exp
     if (st == EDIT_OK) return EDIT_OK;
     if (st != EDIT_ERR_PATH_NOT_FOUND) return st;
 
-    st = split_parent_and_key(root, path, &parent_path, &key, err, err_sz);
-    if (st != EDIT_OK) goto done;
-
-    st = resolve_parent_compound(root, parent_path, &parent, err, err_sz);
+    st = resolve_set_parent_and_key(root, path, &parent, &key, err, err_sz);
     if (st != EDIT_OK) goto done;
 
     existing = find_child_by_name(parent, key, NULL);
@@ -677,13 +595,13 @@ EditStatus set_tag_by_path(NBTTag* root, const char* path, const char* value_exp
     st = EDIT_OK;
 
 done:
-    free(parent_path);
     free(key);
     return st;
 }
 
 EditStatus delete_tag_by_path(NBTTag* root, const char* path, char* err, size_t err_sz) {
-    PathTarget target;
+    PathTarget* targets = NULL;
+    size_t count = 0;
     EditStatus st;
 
     if (!root || !path) {
@@ -691,57 +609,18 @@ EditStatus delete_tag_by_path(NBTTag* root, const char* path, char* err, size_t 
         return EDIT_ERR_PATH_SYNTAX;
     }
 
-    st = resolve_edit_path(root, path, &target, err, err_sz);
+    st = resolve_edit_paths(root, path, &targets, &count, err, err_sz);
     if (st != EDIT_OK) return st;
 
-    switch (target.kind) {
-        case PATH_TARGET_LIST_ELEMENT:
-            return delete_list_element(target.tag, target.index, err, err_sz);
-
-        case PATH_TARGET_BYTE_ARRAY_ELEMENT:
-        case PATH_TARGET_INT_ARRAY_ELEMENT:
-        case PATH_TARGET_LONG_ARRAY_ELEMENT:
-            return delete_array_element(target.tag, target.index, err, err_sz);
-
-        case PATH_TARGET_TAG: {
-            char* parent_path = NULL;
-            char* key = NULL;
-            NBTTag* parent = NULL;
-            int index = -1;
-            NBTTag* found;
-
-            if (target.tag == root) {
-                set_err(err, err_sz, "unsupported operation: cannot delete root tag");
-                return EDIT_ERR_UNSUPPORTED;
-            }
-
-            st = split_parent_and_key(root, path, &parent_path, &key, err, err_sz);
-            if (st != EDIT_OK) {
-                free(parent_path);
-                free(key);
-                return st;
-            }
-
-            st = resolve_parent_compound(root, parent_path, &parent, err, err_sz);
-            free(parent_path);
-            if (st != EDIT_OK) {
-                free(key);
-                return st;
-            }
-
-            found = find_child_by_name(parent, key, &index);
-            free(key);
-            if (!found || index < 0) {
-                set_err(err, err_sz, "path not found");
-                return EDIT_ERR_PATH_NOT_FOUND;
-            }
-
-            remove_compound_child_at(parent, index);
-            return EDIT_OK;
+    qsort(targets, count, sizeof(PathTarget), compare_delete_targets);
+    for (size_t i = 0; i < count; i++) {
+        st = delete_single_target(&targets[i], root, err, err_sz);
+        if (st != EDIT_OK) {
+            free_edit_paths(targets);
+            return st;
         }
-
-        default:
-            set_err(err, err_sz, "unsupported operation");
-            return EDIT_ERR_UNSUPPORTED;
     }
+
+    free_edit_paths(targets);
+    return EDIT_OK;
 }
