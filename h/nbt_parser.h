@@ -70,6 +70,6 @@ typedef struct NBTTag {
     int array_length;
 } NBTTag;
 
-void parse_nbt(const unsigned char* data, size_t* offset, int indent);
+void parse_nbt(const NBTTag* tag, int indent);
 
 #endif

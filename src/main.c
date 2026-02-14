@@ -295,11 +295,12 @@ int main(int argc, char* argv[]) {
     }
 
     size_t offset = 0;
+    char parse_err[256] = {0};
 
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    NBTTag* root = build_nbt_tree(data, &offset);
+    NBTTag* root = build_nbt_tree(data, size, &offset, parse_err, sizeof(parse_err));
 
     clock_gettime(CLOCK_MONOTONIC, &end);
 
@@ -309,9 +310,13 @@ int main(int argc, char* argv[]) {
     printf("Parsed in %.2f ms\n", elapsed_ms);
 
     if (!root) {
-        fprintf(stderr, "Failed to parse NBT root\n");
+        fprintf(stderr, "Failed to parse NBT root: %s\n", parse_err[0] ? parse_err : "corrupt or truncated input");
         free(data);
         return 1;
+    }
+
+    if (offset < size) {
+        fprintf(stderr, "Warning: trailing %zu bytes after parsed root tag\n", size - offset);
     }
 
     printf("Root tag name: '%s' | type: %d\n", root->name ? root->name : "", root->type);
@@ -425,8 +430,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        offset = 0;
-        parse_nbt(data, &offset, 0); // Parse and write into the dump file
+        parse_nbt(root, 0); // Write parsed tree into the dump file
 
         fflush(stdout);
         if (dup2(stdout_fd, fileno(stdout)) < 0) {
@@ -444,8 +448,7 @@ int main(int argc, char* argv[]) {
 
     } else {
         // DEFAULT MODE (print to terminal)
-        offset = 0;
-        parse_nbt(data, &offset, 0);
+        parse_nbt(root, 0);
         printf("Parsed and printed in %.2f ms\n", elapsed_ms);
     }
 

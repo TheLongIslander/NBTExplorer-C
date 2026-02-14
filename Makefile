@@ -28,9 +28,13 @@ $(BIN_DIR)/%.s: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -S $< -o $@
 
 test: $(EXE)
-	./tests/run_edit_tests.sh
+	bash ./tests/run_edit_tests.sh
+	bash ./tests/run_corruption_tests.sh
+
+fuzz: $(EXE)
+	bash ./tests/fuzz_malformed_nbt.sh
 
 clean:
 	rm -f $(BIN_DIR)/*.o $(BIN_DIR)/*.s $(EXE)
 
-.PHONY: all clean asm test
+.PHONY: all clean asm test fuzz

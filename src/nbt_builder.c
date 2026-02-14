@@ -1,20 +1,18 @@
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "nbt_parser.h"
+#include "nbt_builder.h"
 #include "nbt_utils.h"
 
-void free_nbt_tree(NBTTag* tag);
-NBTTag* build_nbt_tree(const unsigned char* data, size_t* offset);
+static void set_err(char* err, size_t err_sz, const char* msg) {
+    if (err && err_sz > 0) {
+        snprintf(err, err_sz, "%s", msg);
+    }
+}
 
-static char* read_nbt_name(const unsigned char* data, size_t* offset) {
-    uint16_t len = read_u16(data, offset);
-    char* str = malloc(len + 1);
-    if (!str) return NULL;
-    memcpy(str, data + *offset, len);
-    str[len] = '\0';
-    *offset += len;
-    return str;
+static int is_valid_tag_type(uint8_t tag_type) {
+    return tag_type >= TAG_End && tag_type <= TAG_Long_Array;
 }
 
 static NBTTag* create_empty_tag(TagType type, const char* name) {
@@ -45,7 +43,7 @@ static NBTTag* create_empty_tag(TagType type, const char* name) {
 
 static int append_compound_child(NBTTag* compound, NBTTag* child) {
     int new_count = compound->value.compound.count + 1;
-    NBTTag** new_items = realloc(compound->value.compound.items, new_count * sizeof(NBTTag*));
+    NBTTag** new_items = realloc(compound->value.compound.items, (size_t)new_count * sizeof(NBTTag*));
     if (!new_items) return 0;
     compound->value.compound.items = new_items;
     compound->value.compound.items[new_count - 1] = child;
@@ -53,33 +51,72 @@ static int append_compound_child(NBTTag* compound, NBTTag* child) {
     return 1;
 }
 
-static int parse_payload(NBTTag* tag, const unsigned char* data, size_t* offset) {
+static void free_partial_list_items(NBTTag** items, int count) {
+    if (!items) return;
+    for (int i = 0; i < count; i++) {
+        free_nbt_tree(items[i]);
+    }
+    free(items);
+}
+
+static char* read_nbt_name(NBTReader* reader) {
+    uint16_t len = 0;
+    char* str;
+
+    if (!nbt_read_u16(reader, &len)) return NULL;
+    str = malloc((size_t)len + 1);
+    if (!str) return NULL;
+    if (!nbt_read_bytes(reader, (unsigned char*)str, len)) {
+        free(str);
+        return NULL;
+    }
+    str[len] = '\0';
+    return str;
+}
+
+static NBTTag* build_tag_from_reader(NBTReader* reader, char* err, size_t err_sz);
+
+static int parse_payload(NBTTag* tag, NBTReader* reader, char* err, size_t err_sz) {
     switch (tag->type) {
         case TAG_End:
             return 1;
 
-        case TAG_Byte:
-            tag->value.byte_val = (int8_t)read_u8(data, offset);
+        case TAG_Byte: {
+            uint8_t v = 0;
+            if (!nbt_read_u8(reader, &v)) return 0;
+            tag->value.byte_val = (int8_t)v;
             return 1;
+        }
 
-        case TAG_Short:
-            tag->value.short_val = (int16_t)read_u16(data, offset);
+        case TAG_Short: {
+            uint16_t v = 0;
+            if (!nbt_read_u16(reader, &v)) return 0;
+            tag->value.short_val = (int16_t)v;
             return 1;
+        }
 
-        case TAG_Int:
-            tag->value.int_val = read_i32(data, offset);
+        case TAG_Int: {
+            int32_t v = 0;
+            if (!nbt_read_i32(reader, &v)) return 0;
+            tag->value.int_val = v;
             return 1;
+        }
 
-        case TAG_Long:
-            tag->value.long_val = read_i64(data, offset);
+        case TAG_Long: {
+            int64_t v = 0;
+            if (!nbt_read_i64(reader, &v)) return 0;
+            tag->value.long_val = v;
             return 1;
+        }
 
         case TAG_Float: {
             union {
                 uint32_t i;
                 float f;
             } u;
-            u.i = (uint32_t)read_i32(data, offset);
+            int32_t raw = 0;
+            if (!nbt_read_i32(reader, &raw)) return 0;
+            u.i = (uint32_t)raw;
             tag->value.float_val = u.f;
             return 1;
         }
@@ -89,65 +126,99 @@ static int parse_payload(NBTTag* tag, const unsigned char* data, size_t* offset)
                 uint64_t i;
                 double d;
             } u;
-            u.i = (uint64_t)read_i64(data, offset);
+            int64_t raw = 0;
+            if (!nbt_read_i64(reader, &raw)) return 0;
+            u.i = (uint64_t)raw;
             tag->value.double_val = u.d;
             return 1;
         }
 
         case TAG_String: {
-            uint16_t len = read_u16(data, offset);
-            char* str = realloc(tag->value.string_val, len + 1);
-            if (!str) return 0;
+            uint16_t len = 0;
+            char* str;
+            if (!nbt_read_u16(reader, &len)) return 0;
+            str = realloc(tag->value.string_val, (size_t)len + 1);
+            if (!str) {
+                set_err(err, err_sz, "out of memory while parsing string");
+                return 0;
+            }
             tag->value.string_val = str;
-            memcpy(tag->value.string_val, data + *offset, len);
+            if (!nbt_read_bytes(reader, (unsigned char*)tag->value.string_val, len)) return 0;
             tag->value.string_val[len] = '\0';
-            *offset += len;
             return 1;
         }
 
         case TAG_Byte_Array: {
-            int32_t len = read_i32(data, offset);
-            if (len < 0) return 0;
+            int32_t len = 0;
+            if (!nbt_read_i32(reader, &len)) return 0;
+            if (len < 0) {
+                set_err(err, err_sz, "corrupt NBT: negative TAG_Byte_Array length");
+                return 0;
+            }
             tag->value.byte_array.length = len;
             if (len == 0) {
                 tag->value.byte_array.data = NULL;
                 return 1;
             }
             tag->value.byte_array.data = malloc((size_t)len);
-            if (!tag->value.byte_array.data) return 0;
-            memcpy(tag->value.byte_array.data, data + *offset, (size_t)len);
-            *offset += (size_t)len;
+            if (!tag->value.byte_array.data) {
+                set_err(err, err_sz, "out of memory while parsing TAG_Byte_Array");
+                return 0;
+            }
+            if (!nbt_read_bytes(reader, tag->value.byte_array.data, (size_t)len)) return 0;
             return 1;
         }
 
         case TAG_Int_Array: {
-            int32_t len = read_i32(data, offset);
-            if (len < 0) return 0;
+            int32_t len = 0;
+            if (!nbt_read_i32(reader, &len)) return 0;
+            if (len < 0) {
+                set_err(err, err_sz, "corrupt NBT: negative TAG_Int_Array length");
+                return 0;
+            }
             tag->value.int_array.length = len;
             if (len == 0) {
                 tag->value.int_array.data = NULL;
                 return 1;
             }
+            if ((size_t)len > SIZE_MAX / sizeof(int32_t)) {
+                set_err(err, err_sz, "corrupt NBT: TAG_Int_Array length overflow");
+                return 0;
+            }
             tag->value.int_array.data = malloc((size_t)len * sizeof(int32_t));
-            if (!tag->value.int_array.data) return 0;
+            if (!tag->value.int_array.data) {
+                set_err(err, err_sz, "out of memory while parsing TAG_Int_Array");
+                return 0;
+            }
             for (int32_t i = 0; i < len; i++) {
-                tag->value.int_array.data[i] = read_i32(data, offset);
+                if (!nbt_read_i32(reader, &tag->value.int_array.data[i])) return 0;
             }
             return 1;
         }
 
         case TAG_Long_Array: {
-            int32_t len = read_i32(data, offset);
-            if (len < 0) return 0;
+            int32_t len = 0;
+            if (!nbt_read_i32(reader, &len)) return 0;
+            if (len < 0) {
+                set_err(err, err_sz, "corrupt NBT: negative TAG_Long_Array length");
+                return 0;
+            }
             tag->value.long_array.length = len;
             if (len == 0) {
                 tag->value.long_array.data = NULL;
                 return 1;
             }
+            if ((size_t)len > SIZE_MAX / sizeof(int64_t)) {
+                set_err(err, err_sz, "corrupt NBT: TAG_Long_Array length overflow");
+                return 0;
+            }
             tag->value.long_array.data = malloc((size_t)len * sizeof(int64_t));
-            if (!tag->value.long_array.data) return 0;
+            if (!tag->value.long_array.data) {
+                set_err(err, err_sz, "out of memory while parsing TAG_Long_Array");
+                return 0;
+            }
             for (int32_t i = 0; i < len; i++) {
-                tag->value.long_array.data[i] = read_i64(data, offset);
+                if (!nbt_read_i64(reader, &tag->value.long_array.data[i])) return 0;
             }
             return 1;
         }
@@ -157,17 +228,20 @@ static int parse_payload(NBTTag* tag, const unsigned char* data, size_t* offset)
             tag->value.compound.items = NULL;
 
             while (1) {
-                uint8_t next_type = read_u8(data, offset);
+                uint8_t next_type = 0;
+                NBTTag* child;
+
+                if (!nbt_peek_u8(reader, &next_type)) return 0;
                 if (next_type == TAG_End) {
+                    if (!nbt_skip_bytes(reader, 1)) return 0;
                     break;
                 }
-                (*offset)--;
 
-                NBTTag* child = build_nbt_tree(data, offset);
+                child = build_tag_from_reader(reader, err, err_sz);
                 if (!child) return 0;
-
                 if (!append_compound_child(tag, child)) {
                     free_nbt_tree(child);
+                    set_err(err, err_sz, "out of memory while growing TAG_Compound");
                     return 0;
                 }
             }
@@ -176,29 +250,56 @@ static int parse_payload(NBTTag* tag, const unsigned char* data, size_t* offset)
         }
 
         case TAG_List: {
-            uint8_t elem_type = read_u8(data, offset);
-            int32_t count = read_i32(data, offset);
-            if (count < 0) return 0;
+            uint8_t elem_type = 0;
+            int32_t count = 0;
+
+            if (!nbt_read_u8(reader, &elem_type)) return 0;
+            if (!is_valid_tag_type(elem_type)) {
+                set_err(err, err_sz, "corrupt NBT: invalid TAG_List element type");
+                return 0;
+            }
+            if (!nbt_read_i32(reader, &count)) return 0;
+            if (count < 0) {
+                set_err(err, err_sz, "corrupt NBT: negative TAG_List length");
+                return 0;
+            }
 
             tag->value.list.element_type = (TagType)elem_type;
             tag->value.list.count = count;
             tag->value.list.items = NULL;
 
             if (count == 0) return 1;
-            if (elem_type == TAG_End) return 0;
+            if (elem_type == TAG_End) {
+                set_err(err, err_sz, "corrupt NBT: TAG_List with TAG_End element type must be empty");
+                return 0;
+            }
+            if ((size_t)count > SIZE_MAX / sizeof(NBTTag*)) {
+                set_err(err, err_sz, "corrupt NBT: TAG_List length overflow");
+                return 0;
+            }
 
             tag->value.list.items = calloc((size_t)count, sizeof(NBTTag*));
-            if (!tag->value.list.items) return 0;
+            if (!tag->value.list.items) {
+                set_err(err, err_sz, "out of memory while parsing TAG_List");
+                return 0;
+            }
 
             for (int32_t i = 0; i < count; i++) {
                 NBTTag* elem = create_empty_tag((TagType)elem_type, "");
-                if (!elem) return 0;
-
-                if (!parse_payload(elem, data, offset)) {
-                    free_nbt_tree(elem);
+                if (!elem) {
+                    set_err(err, err_sz, "out of memory while creating TAG_List element");
+                    free_partial_list_items(tag->value.list.items, i);
+                    tag->value.list.items = NULL;
+                    tag->value.list.count = 0;
                     return 0;
                 }
-
+                if (!parse_payload(elem, reader, err, err_sz)) {
+                    free_nbt_tree(elem);
+                    free_partial_list_items(tag->value.list.items, i);
+                    tag->value.list.items = NULL;
+                    tag->value.list.count = 0;
+                    return 0;
+                }
                 tag->value.list.items[i] = elem;
             }
 
@@ -206,27 +307,72 @@ static int parse_payload(NBTTag* tag, const unsigned char* data, size_t* offset)
         }
 
         default:
+            set_err(err, err_sz, "corrupt NBT: unknown tag type");
             return 0;
     }
 }
 
-NBTTag* build_nbt_tree(const unsigned char* data, size_t* offset) {
-    uint8_t tag_type = read_u8(data, offset);
-    if (tag_type == TAG_End) return NULL;
+static NBTTag* build_tag_from_reader(NBTReader* reader, char* err, size_t err_sz) {
+    uint8_t tag_type = TAG_End;
+    char* name;
+    NBTTag* tag;
 
-    char* name = read_nbt_name(data, offset);
+    if (!nbt_read_u8(reader, &tag_type)) return NULL;
+    if (!is_valid_tag_type(tag_type)) {
+        set_err(err, err_sz, "corrupt NBT: invalid tag type");
+        return NULL;
+    }
+    if (tag_type == TAG_End) {
+        set_err(err, err_sz, "corrupt NBT: unexpected TAG_End tag");
+        return NULL;
+    }
+
+    name = read_nbt_name(reader);
     if (!name) return NULL;
 
-    NBTTag* tag = create_empty_tag((TagType)tag_type, name);
+    tag = create_empty_tag((TagType)tag_type, name);
     free(name);
-    if (!tag) return NULL;
+    if (!tag) {
+        set_err(err, err_sz, "out of memory while creating NBT tag");
+        return NULL;
+    }
 
-    if (!parse_payload(tag, data, offset)) {
+    if (!parse_payload(tag, reader, err, err_sz)) {
         free_nbt_tree(tag);
         return NULL;
     }
 
     return tag;
+}
+
+NBTTag* build_nbt_tree(const unsigned char* data, size_t data_size, size_t* offset, char* err, size_t err_sz) {
+    NBTReader reader;
+    NBTTag* root;
+
+    if (!data) {
+        set_err(err, err_sz, "invalid input buffer");
+        return NULL;
+    }
+
+    nbt_reader_init(&reader, data, data_size);
+    if (offset && !nbt_reader_set_offset(&reader, *offset)) {
+        set_err(err, err_sz, nbt_reader_error(&reader));
+        return NULL;
+    }
+
+    root = build_tag_from_reader(&reader, err, err_sz);
+    if (!root) {
+        if (nbt_reader_failed(&reader) && (!err || err[0] == '\0')) {
+            set_err(err, err_sz, nbt_reader_error(&reader));
+        }
+        return NULL;
+    }
+
+    if (offset) {
+        *offset = nbt_reader_offset(&reader);
+    }
+
+    return root;
 }
 
 void free_nbt_tree(NBTTag* tag) {
