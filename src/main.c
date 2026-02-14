@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 #include "io.h"
 #include "nbt_builder.h"
 #include "nbt_utils.h"
@@ -9,16 +10,260 @@
 #include <zlib.h>
 #include <unistd.h>
 
+typedef enum {
+    MODE_DEFAULT = 0,
+    MODE_EDIT,
+    MODE_DUMP
+} CliMode;
+
+static void print_usage(const char* prog) {
+    printf("Usage:\n");
+    printf("  %s <file.dat> [--edit path newValue] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
+    printf("  %s <file.dat> [--dump output.txt]\n", prog);
+}
+
+static void set_err(char* err, size_t err_sz, const char* msg) {
+    if (err && err_sz > 0) {
+        snprintf(err, err_sz, "%s", msg);
+    }
+}
+
+static int copy_file(const char* src, const char* dst, char* err, size_t err_sz) {
+    FILE* in = NULL;
+    FILE* out = NULL;
+    unsigned char buf[8192];
+    size_t n;
+    int ok = 0;
+
+    in = fopen(src, "rb");
+    if (!in) {
+        if (err && err_sz > 0) {
+            snprintf(err, err_sz, "fopen(%s): %s", src, strerror(errno));
+        }
+        return 0;
+    }
+
+    out = fopen(dst, "wb");
+    if (!out) {
+        if (err && err_sz > 0) {
+            snprintf(err, err_sz, "fopen(%s): %s", dst, strerror(errno));
+        }
+        fclose(in);
+        return 0;
+    }
+
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            set_err(err, err_sz, "failed to write backup file");
+            goto done;
+        }
+    }
+
+    if (ferror(in)) {
+        set_err(err, err_sz, "failed to read input file while creating backup");
+        goto done;
+    }
+
+    ok = 1;
+
+done:
+    fclose(in);
+    if (fclose(out) != 0) {
+        ok = 0;
+    }
+    if (!ok) {
+        remove(dst);
+    }
+    return ok;
+}
+
+static char* make_backup_path(const char* input_path, const char* suffix) {
+    size_t in_len = strlen(input_path);
+    size_t suf_len = strlen(suffix);
+    char* out = malloc(in_len + suf_len + 1);
+    if (!out) return NULL;
+    memcpy(out, input_path, in_len);
+    memcpy(out + in_len, suffix, suf_len);
+    out[in_len + suf_len] = '\0';
+    return out;
+}
+
+static char* make_temp_template(const char* target_path) {
+    const char* slash = strrchr(target_path, '/');
+    const char* base = ".nbt_explorer_tmp_XXXXXX";
+    size_t base_len = strlen(base);
+    char* tmpl;
+
+    if (!slash) {
+        tmpl = malloc(base_len + 1);
+        if (!tmpl) return NULL;
+        memcpy(tmpl, base, base_len + 1);
+        return tmpl;
+    }
+
+    size_t dir_len = (size_t)(slash - target_path + 1);
+    tmpl = malloc(dir_len + base_len + 1);
+    if (!tmpl) return NULL;
+
+    memcpy(tmpl, target_path, dir_len);
+    memcpy(tmpl + dir_len, base, base_len);
+    tmpl[dir_len + base_len] = '\0';
+    return tmpl;
+}
+
+static int write_nbt_atomically(const char* target_path, NBTTag* root, char* err, size_t err_sz) {
+    char* tmp_template = make_temp_template(target_path);
+    int fd;
+    gzFile out;
+    int zret;
+
+    if (!tmp_template) {
+        set_err(err, err_sz, "out of memory");
+        return 0;
+    }
+
+    fd = mkstemp(tmp_template);
+    if (fd < 0) {
+        if (err && err_sz > 0) {
+            snprintf(err, err_sz, "mkstemp(%s): %s", tmp_template, strerror(errno));
+        }
+        free(tmp_template);
+        return 0;
+    }
+
+    out = gzdopen(fd, "wb");
+    if (!out) {
+        if (err && err_sz > 0) {
+            snprintf(err, err_sz, "gzdopen: %s", strerror(errno));
+        }
+        close(fd);
+        unlink(tmp_template);
+        free(tmp_template);
+        return 0;
+    }
+
+    write_tag(out, root);
+    zret = gzclose(out);
+    if (zret != Z_OK) {
+        set_err(err, err_sz, "failed to finish compressed output write");
+        unlink(tmp_template);
+        free(tmp_template);
+        return 0;
+    }
+
+    if (rename(tmp_template, target_path) != 0) {
+        if (err && err_sz > 0) {
+            snprintf(err, err_sz, "rename(%s -> %s): %s", tmp_template, target_path, strerror(errno));
+        }
+        unlink(tmp_template);
+        free(tmp_template);
+        return 0;
+    }
+
+    free(tmp_template);
+    return 1;
+}
+
 int main(int argc, char* argv[]) {
+    CliMode mode = MODE_DEFAULT;
+    const char* input_path;
+    const char* edit_path = NULL;
+    const char* edit_value = NULL;
+    const char* dump_path = NULL;
+    const char* output_path = NULL;
+    const char* backup_suffix = ".bak";
+    int in_place = 0;
+    int backup_enabled = 0;
+
     if (argc < 2) {
-        printf("Usage:\n");
-        printf("  %s <file.dat> [--edit path newValue]\n", argv[0]);
-        printf("  %s <file.dat> [--dump output.txt]\n", argv[0]);
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    input_path = argv[1];
+
+    for (int i = 2; i < argc; i++) {
+        const char* arg = argv[i];
+
+        if (strcmp(arg, "--edit") == 0) {
+            if (mode != MODE_DEFAULT || i + 2 >= argc) {
+                print_usage(argv[0]);
+                return 1;
+            }
+            mode = MODE_EDIT;
+            edit_path = argv[++i];
+            edit_value = argv[++i];
+            continue;
+        }
+
+        if (strcmp(arg, "--dump") == 0) {
+            if (mode != MODE_DEFAULT || i + 1 >= argc) {
+                print_usage(argv[0]);
+                return 1;
+            }
+            mode = MODE_DUMP;
+            dump_path = argv[++i];
+            continue;
+        }
+
+        if (strcmp(arg, "--output") == 0) {
+            if (i + 1 >= argc) {
+                print_usage(argv[0]);
+                return 1;
+            }
+            output_path = argv[++i];
+            continue;
+        }
+
+        if (strcmp(arg, "--in-place") == 0) {
+            in_place = 1;
+            continue;
+        }
+
+        if (strcmp(arg, "--backup") == 0) {
+            backup_enabled = 1;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                backup_suffix = argv[++i];
+            }
+            continue;
+        }
+
+        if (strncmp(arg, "--backup=", 9) == 0) {
+            backup_enabled = 1;
+            backup_suffix = arg + 9;
+            if (backup_suffix[0] == '\0') {
+                fprintf(stderr, "Invalid --backup suffix\n");
+                return 1;
+            }
+            continue;
+        }
+
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    if (mode != MODE_EDIT && (output_path || in_place || backup_enabled)) {
+        fprintf(stderr, "--output/--in-place/--backup are only valid with --edit\n");
+        return 1;
+    }
+
+    if (mode == MODE_EDIT && output_path && in_place) {
+        fprintf(stderr, "Use either --output or --in-place, not both\n");
+        return 1;
+    }
+
+    if (mode == MODE_EDIT && backup_enabled && !in_place) {
+        fprintf(stderr, "--backup is only valid with --in-place\n");
+        return 1;
+    }
+
+    if (mode == MODE_EDIT && backup_enabled && backup_suffix[0] == '\0') {
+        fprintf(stderr, "Backup suffix cannot be empty\n");
         return 1;
     }
 
     size_t size;
-    unsigned char* data = decompress_gzip(argv[1], &size);
+    unsigned char* data = decompress_gzip(input_path, &size);
     if (!data) {
         fprintf(stderr, "Failed to load file\n");
         return 1;
@@ -38,48 +283,78 @@ int main(int argc, char* argv[]) {
 
     printf("Parsed in %.2f ms\n", elapsed_ms);
 
-    if (root) {
-        printf("Root tag name: '%s' | type: %d\n", root->name ? root->name : "", root->type);
-        if (root->type == TAG_Compound) {
-            printf("Root has %d children:\n", root->value.compound.count);
-            for (int i = 0; i < root->value.compound.count; i++) {
-                NBTTag* child = root->value.compound.items[i];
-                printf("  - %s (type %d)\n", child->name, child->type);
-            }
+    if (!root) {
+        fprintf(stderr, "Failed to parse NBT root\n");
+        free(data);
+        return 1;
+    }
+
+    printf("Root tag name: '%s' | type: %d\n", root->name ? root->name : "", root->type);
+    if (root->type == TAG_Compound) {
+        printf("Root has %d children:\n", root->value.compound.count);
+        for (int i = 0; i < root->value.compound.count; i++) {
+            NBTTag* child = root->value.compound.items[i];
+            printf("  - %s (type %d)\n", child->name, child->type);
         }
     }
 
-    if (argc == 5 && strcmp(argv[2], "--edit") == 0) {
-        // EDIT MODE
+    if (mode == MODE_EDIT) {
         char err[256] = {0};
-        EditStatus st = edit_tag_by_path(root, argv[3], argv[4], err, sizeof(err));
+        char io_err[256] = {0};
+        char* backup_path = NULL;
+        const char* write_path = "modified_output.dat";
+
+        EditStatus st = edit_tag_by_path(root, edit_path, edit_value, err, sizeof(err));
         if (st != EDIT_OK) {
             if (err[0] != '\0') {
-                printf("Failed to edit path '%s': %s (%s)\n", argv[3], err, edit_status_name(st));
+                printf("Failed to edit path '%s': %s (%s)\n", edit_path, err, edit_status_name(st));
             } else {
-                printf("Failed to edit path '%s': %s\n", argv[3], edit_status_name(st));
+                printf("Failed to edit path '%s': %s\n", edit_path, edit_status_name(st));
             }
             free(data);
             free_nbt_tree(root);
             return 1;
         }
-        printf("Updated %s successfully\n", argv[3]);
+        printf("Updated %s successfully\n", edit_path);
 
-        gzFile out = gzopen("modified_output.dat", "wb");
-        if (!out) {
-            perror("gzopen");
+        if (in_place) {
+            write_path = input_path;
+        } else if (output_path) {
+            write_path = output_path;
+        }
+
+        if (in_place && backup_enabled) {
+            backup_path = make_backup_path(input_path, backup_suffix);
+            if (!backup_path) {
+                fprintf(stderr, "Failed to allocate backup path\n");
+                free(data);
+                free_nbt_tree(root);
+                return 1;
+            }
+            if (!copy_file(input_path, backup_path, io_err, sizeof(io_err))) {
+                fprintf(stderr, "Backup creation failed: %s\n", io_err[0] ? io_err : "unknown error");
+                free(backup_path);
+                free(data);
+                free_nbt_tree(root);
+                return 1;
+            }
+            printf("Created backup: %s\n", backup_path);
+        }
+
+        if (!write_nbt_atomically(write_path, root, io_err, sizeof(io_err))) {
+            fprintf(stderr, "Failed to save edited NBT: %s\n", io_err[0] ? io_err : "unknown error");
+            free(backup_path);
             free(data);
             free_nbt_tree(root);
             return 1;
         }
 
-        write_tag(out, root);
-        gzclose(out);
-        printf("Saved modified NBT to modified_output.dat\n");
+        printf("Saved modified NBT to %s\n", write_path);
+        free(backup_path);
 
-    } else if (argc == 4 && strcmp(argv[2], "--dump") == 0) {
+    } else if (mode == MODE_DUMP) {
         // DUMP MODE
-        FILE* dump_file = fopen(argv[3], "w");
+        FILE* dump_file = fopen(dump_path, "w");
         if (!dump_file) {
             perror("fopen");
             free(data);
@@ -121,12 +396,12 @@ int main(int argc, char* argv[]) {
         close(stdout_fd);
         fclose(dump_file);
 
-        printf("Dumped parsed NBT to %s\n", argv[3]);
+        printf("Dumped parsed NBT to %s\n", dump_path);
 
     } else {
         // DEFAULT MODE (print to terminal)
         offset = 0;
-        parse_nbt(data, &offset, 0); 
+        parse_nbt(data, &offset, 0);
         printf("Parsed and printed in %.2f ms\n", elapsed_ms);
     }
 
