@@ -288,11 +288,15 @@ int main(int argc, char* argv[]) {
     }
 
     size_t size;
-    unsigned char* data = decompress_gzip(input_path, &size);
+    char load_err[256] = {0};
+    NBTInputFormat input_format = NBT_INPUT_FORMAT_UNKNOWN;
+    unsigned char* data = load_nbt_data_auto(input_path, &size, &input_format, load_err, sizeof(load_err));
     if (!data) {
-        fprintf(stderr, "Failed to load file\n");
+        fprintf(stderr, "Failed to load file: %s\n", load_err[0] ? load_err : "unknown error");
         return 1;
     }
+
+    printf("Detected input format: %s\n", nbt_input_format_name(input_format));
 
     size_t offset = 0;
     char parse_err[256] = {0};

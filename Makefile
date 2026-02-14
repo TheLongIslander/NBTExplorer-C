@@ -29,6 +29,7 @@ $(BIN_DIR)/%.s: $(SRC_DIR)/%.c
 
 test: $(EXE)
 	bash ./tests/run_edit_tests.sh
+	bash ./tests/run_format_tests.sh
 	bash ./tests/run_corruption_tests.sh
 
 fuzz: $(EXE)
