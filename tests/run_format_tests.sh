@@ -59,24 +59,35 @@ raw = pathlib.Path(sys.argv[1]).read_bytes()
 pathlib.Path(sys.argv[2]).write_bytes(zlib.compress(raw))
 PY
 
-echo "[1/4] Detect raw NBT for dump"
+echo "[1/5] Detect raw NBT for dump"
 "$BIN" "$RAW_FILE" --dump "$TMP_DIR/raw_dump.txt" >"$TMP_DIR/raw_dump.log" 2>&1
 assert_grep "Detected input format: raw" "$TMP_DIR/raw_dump.log"
 assert_grep "Tag: Data \(Type 0A\)" "$TMP_DIR/raw_dump.txt"
 
-echo "[2/4] Detect zlib NBT for dump"
+echo "[2/5] Detect zlib NBT for dump"
 "$BIN" "$ZLIB_FILE" --dump "$TMP_DIR/zlib_dump.txt" >"$TMP_DIR/zlib_dump.log" 2>&1
 assert_grep "Detected input format: zlib" "$TMP_DIR/zlib_dump.log"
 assert_grep "Tag: Data \(Type 0A\)" "$TMP_DIR/zlib_dump.txt"
 
-echo "[3/4] Edit raw NBT input"
+echo "[3/5] Edit raw NBT input"
 "$BIN" "$RAW_FILE" --edit "Data/SpawnX" "2468" --output "$TMP_DIR/raw_edit_out.dat" >"$TMP_DIR/raw_edit.log" 2>&1
 "$BIN" "$TMP_DIR/raw_edit_out.dat" --dump "$TMP_DIR/raw_edit_dump.txt" >"$TMP_DIR/raw_edit_dump.log" 2>&1
 assert_grep "Int: 2468" "$TMP_DIR/raw_edit_dump.txt"
 
-echo "[4/4] Edit zlib NBT input"
+echo "[4/5] Edit zlib NBT input"
 "$BIN" "$ZLIB_FILE" --edit "Data/SpawnX" "1357" --output "$TMP_DIR/zlib_edit_out.dat" >"$TMP_DIR/zlib_edit.log" 2>&1
 "$BIN" "$TMP_DIR/zlib_edit_out.dat" --dump "$TMP_DIR/zlib_edit_dump.txt" >"$TMP_DIR/zlib_edit_dump.log" 2>&1
 assert_grep "Int: 1357" "$TMP_DIR/zlib_edit_dump.txt"
+
+MCA_FILE="${MCA_FILE:-r.-9.3.mca}"
+if [[ -f "$MCA_FILE" ]]; then
+  echo "[5/5] Detect .mca chunk load"
+  "$BIN" "$MCA_FILE" --dump "$TMP_DIR/mca_dump.txt" >"$TMP_DIR/mca_dump.log" 2>&1
+  assert_grep "Detected source: mca_chunk" "$TMP_DIR/mca_dump.log"
+  assert_grep "Using region chunk \\(" "$TMP_DIR/mca_dump.log"
+  assert_grep "Tag: " "$TMP_DIR/mca_dump.txt"
+else
+  echo "[5/5] Skip .mca format check (missing $MCA_FILE)"
+fi
 
 echo "All format tests passed"

@@ -3,6 +3,7 @@
 #include <string.h>
 #include <time.h>
 #include <errno.h>
+#include <limits.h>
 #include "io.h"
 #include "nbt_builder.h"
 #include "nbt_utils.h"
@@ -20,10 +21,11 @@ typedef enum {
 
 static void print_usage(const char* prog) {
     printf("Usage:\n");
-    printf("  %s <file.dat> [--edit path newValue] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
-    printf("  %s <file.dat> [--set path newValue] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
-    printf("  %s <file.dat> [--delete path] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
-    printf("  %s <file.dat> [--dump output.txt]\n", prog);
+    printf("  %s <file.dat|file.mca> [--chunk x z] [--edit path newValue] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
+    printf("  %s <file.dat|file.mca> [--chunk x z] [--set path newValue] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
+    printf("  %s <file.dat|file.mca> [--chunk x z] [--delete path] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
+    printf("  %s <file.dat|file.mca> [--chunk x z] [--dump output.txt]\n", prog);
+    printf("  --chunk x z selects a local chunk from .mca (0..31 each). If omitted, first populated chunk is used.\n");
 }
 
 static void set_err(char* err, size_t err_sz, const char* msg) {
@@ -168,6 +170,24 @@ static int write_nbt_atomically(const char* target_path, NBTTag* root, char* err
     return 1;
 }
 
+static int parse_int_arg(const char* text, int* out_value) {
+    char* end = NULL;
+    long value;
+
+    if (!text || !out_value) return 0;
+
+    errno = 0;
+    value = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0') {
+        return 0;
+    }
+    if (value < INT_MIN || value > INT_MAX) {
+        return 0;
+    }
+    *out_value = (int)value;
+    return 1;
+}
+
 int main(int argc, char* argv[]) {
     CliMode mode = MODE_DEFAULT;
     const char* input_path;
@@ -178,6 +198,7 @@ int main(int argc, char* argv[]) {
     const char* backup_suffix = ".bak";
     int in_place = 0;
     int backup_enabled = 0;
+    NBTLoadOptions load_opts = {0};
 
     if (argc < 2) {
         print_usage(argv[0]);
@@ -263,6 +284,27 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        if (strcmp(arg, "--chunk") == 0) {
+            int chunk_x = 0;
+            int chunk_z = 0;
+            if (load_opts.has_chunk_coords || i + 2 >= argc) {
+                print_usage(argv[0]);
+                return 1;
+            }
+            if (!parse_int_arg(argv[++i], &chunk_x) || !parse_int_arg(argv[++i], &chunk_z)) {
+                fprintf(stderr, "Invalid --chunk coordinates (expected integers)\n");
+                return 1;
+            }
+            if (chunk_x < 0 || chunk_x > 31 || chunk_z < 0 || chunk_z > 31) {
+                fprintf(stderr, "--chunk coordinates must be in range 0..31\n");
+                return 1;
+            }
+            load_opts.has_chunk_coords = 1;
+            load_opts.chunk_x = chunk_x;
+            load_opts.chunk_z = chunk_z;
+            continue;
+        }
+
         print_usage(argv[0]);
         return 1;
     }
@@ -289,14 +331,25 @@ int main(int argc, char* argv[]) {
 
     size_t size;
     char load_err[256] = {0};
-    NBTInputFormat input_format = NBT_INPUT_FORMAT_UNKNOWN;
-    unsigned char* data = load_nbt_data_auto(input_path, &size, &input_format, load_err, sizeof(load_err));
+    NBTLoadInfo load_info;
+    unsigned char* data = load_nbt_data(input_path, &size, &load_opts, &load_info, load_err, sizeof(load_err));
     if (!data) {
         fprintf(stderr, "Failed to load file: %s\n", load_err[0] ? load_err : "unknown error");
         return 1;
     }
 
-    printf("Detected input format: %s\n", nbt_input_format_name(input_format));
+    if ((mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) &&
+        load_info.source_type == NBT_SOURCE_REGION_CHUNK && in_place) {
+        fprintf(stderr, "--in-place is not supported for .mca input; write to --output out.dat instead\n");
+        free(data);
+        return 1;
+    }
+
+    printf("Detected source: %s\n", nbt_source_type_name(load_info.source_type));
+    printf("Detected input format: %s\n", nbt_input_format_name(load_info.input_format));
+    if (load_info.source_type == NBT_SOURCE_REGION_CHUNK) {
+        printf("Using region chunk (%d, %d)\n", load_info.chunk_x, load_info.chunk_z);
+    }
 
     size_t offset = 0;
     char parse_err[256] = {0};
