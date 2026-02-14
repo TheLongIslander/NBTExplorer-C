@@ -8,6 +8,8 @@
 #include "nbt_builder.h"
 #include "nbt_utils.h"
 #include "edit_save.h"
+#include "region_read.h"
+#include "region_write.h"
 #include <zlib.h>
 #include <unistd.h>
 
@@ -26,6 +28,7 @@ static void print_usage(const char* prog) {
     printf("  %s <file.dat|file.mca> [--chunk x z] [--delete path] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
     printf("  %s <file.dat|file.mca> [--chunk x z] [--dump output.txt]\n", prog);
     printf("  --chunk x z selects a local chunk from .mca (0..31 each). If omitted, first populated chunk is used.\n");
+    printf("  For .mca edits, --output out.mca rewrites the full region safely; --in-place requires --chunk.\n");
 }
 
 static void set_err(char* err, size_t err_sz, const char* msg) {
@@ -188,6 +191,18 @@ static int parse_int_arg(const char* text, int* out_value) {
     return 1;
 }
 
+static int has_mca_extension(const char* filename) {
+    const char* dot;
+
+    if (!filename) return 0;
+    dot = strrchr(filename, '.');
+    if (!dot) return 0;
+    return (dot[1] == 'm' || dot[1] == 'M') &&
+           (dot[2] == 'c' || dot[2] == 'C') &&
+           (dot[3] == 'a' || dot[3] == 'A') &&
+           dot[4] == '\0';
+}
+
 int main(int argc, char* argv[]) {
     CliMode mode = MODE_DEFAULT;
     const char* input_path;
@@ -329,6 +344,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    if ((mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) &&
+        output_path && has_mca_extension(output_path) && !has_mca_extension(input_path)) {
+        fprintf(stderr, "--output .mca requires .mca input\n");
+        return 1;
+    }
+
     size_t size;
     char load_err[256] = {0};
     NBTLoadInfo load_info;
@@ -339,8 +360,8 @@ int main(int argc, char* argv[]) {
     }
 
     if ((mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) &&
-        load_info.source_type == NBT_SOURCE_REGION_CHUNK && in_place) {
-        fprintf(stderr, "--in-place is not supported for .mca input; write to --output out.dat instead\n");
+        load_info.source_type == NBT_SOURCE_REGION_CHUNK && in_place && !load_opts.has_chunk_coords) {
+        fprintf(stderr, "--in-place with .mca requires explicit --chunk x z\n");
         free(data);
         return 1;
     }
@@ -391,6 +412,7 @@ int main(int argc, char* argv[]) {
         char* backup_path = NULL;
         const char* write_path = "modified_output.dat";
         const char* op_name = NULL;
+        int write_region = 0;
         EditStatus st;
 
         if (mode == MODE_EDIT) {
@@ -429,6 +451,12 @@ int main(int argc, char* argv[]) {
             write_path = output_path;
         }
 
+        if (load_info.source_type == NBT_SOURCE_REGION_CHUNK) {
+            if (in_place || (output_path && has_mca_extension(output_path))) {
+                write_region = 1;
+            }
+        }
+
         if (in_place && backup_enabled) {
             backup_path = make_backup_path(input_path, backup_suffix);
             if (!backup_path) {
@@ -447,12 +475,43 @@ int main(int argc, char* argv[]) {
             printf("Created backup: %s\n", backup_path);
         }
 
-        if (!write_nbt_atomically(write_path, root, io_err, sizeof(io_err))) {
-            fprintf(stderr, "Failed to save edited NBT: %s\n", io_err[0] ? io_err : "unknown error");
-            free(backup_path);
-            free(data);
-            free_nbt_tree(root);
-            return 1;
+        if (write_region) {
+            RegionFile* region = region_file_read(input_path, io_err, sizeof(io_err));
+            if (!region) {
+                fprintf(stderr, "Failed to load region for save: %s\n", io_err[0] ? io_err : "unknown error");
+                free(backup_path);
+                free(data);
+                free_nbt_tree(root);
+                return 1;
+            }
+
+            if (!region_file_update_chunk_from_nbt(region, load_info.chunk_x, load_info.chunk_z, root, -1, io_err, sizeof(io_err))) {
+                fprintf(stderr, "Failed to update region chunk (%d, %d): %s\n", load_info.chunk_x, load_info.chunk_z, io_err[0] ? io_err : "unknown error");
+                region_file_free(region);
+                free(backup_path);
+                free(data);
+                free_nbt_tree(root);
+                return 1;
+            }
+
+            if (!region_file_write_atomic(region, write_path, io_err, sizeof(io_err))) {
+                fprintf(stderr, "Failed to save edited region: %s\n", io_err[0] ? io_err : "unknown error");
+                region_file_free(region);
+                free(backup_path);
+                free(data);
+                free_nbt_tree(root);
+                return 1;
+            }
+
+            region_file_free(region);
+        } else {
+            if (!write_nbt_atomically(write_path, root, io_err, sizeof(io_err))) {
+                fprintf(stderr, "Failed to save edited NBT: %s\n", io_err[0] ? io_err : "unknown error");
+                free(backup_path);
+                free(data);
+                free_nbt_tree(root);
+                return 1;
+            }
         }
 
         printf("Saved modified NBT to %s\n", write_path);

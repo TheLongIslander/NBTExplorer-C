@@ -6,12 +6,9 @@
 #include <errno.h>
 #include <zlib.h>
 #include "io.h"
+#include "region_read.h"
 
 #define CHUNK 16384
-#define REGION_SECTOR_BYTES 4096U
-#define REGION_HEADER_BYTES (REGION_SECTOR_BYTES * 2U)
-#define REGION_CHUNK_GRID 32
-#define REGION_CHUNK_COUNT (REGION_CHUNK_GRID * REGION_CHUNK_GRID)
 
 static void set_err(char* err, size_t err_sz, const char* msg) {
     if (err && err_sz > 0) {
@@ -171,6 +168,20 @@ static unsigned char* inflate_buffer(const unsigned char* input, size_t input_si
     return out;
 }
 
+static unsigned char* copy_bytes(const unsigned char* data, size_t size) {
+    unsigned char* out;
+
+    if (!data && size > 0) return NULL;
+    out = malloc(size == 0 ? 1 : size);
+    if (!out) return NULL;
+
+    if (size > 0) {
+        memcpy(out, data, size);
+    }
+
+    return out;
+}
+
 static int has_mca_extension(const char* filename) {
     const char* dot;
 
@@ -181,24 +192,6 @@ static int has_mca_extension(const char* filename) {
            (dot[2] == 'c' || dot[2] == 'C') &&
            (dot[3] == 'a' || dot[3] == 'A') &&
            dot[4] == '\0';
-}
-
-static uint32_t read_be_u32(const unsigned char* p) {
-    return ((uint32_t)p[0] << 24) |
-           ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8) |
-           (uint32_t)p[3];
-}
-
-static unsigned char* copy_bytes(const unsigned char* data, size_t size) {
-    unsigned char* out;
-    if (!data && size > 0) return NULL;
-    out = malloc(size == 0 ? 1 : size);
-    if (!out) return NULL;
-    if (size > 0) {
-        memcpy(out, data, size);
-    }
-    return out;
 }
 
 static unsigned char* decode_nbt_payload(
@@ -251,184 +244,10 @@ static unsigned char* decode_nbt_payload(
         set_err(err, err_sz, "out of memory");
         return NULL;
     }
+
     if (out_size) *out_size = input_size;
     if (out_format) *out_format = NBT_INPUT_FORMAT_RAW;
     return decoded;
-}
-
-static int load_region_chunk_entry(
-    const unsigned char* region_data,
-    size_t region_size,
-    int chunk_x,
-    int chunk_z,
-    size_t* out_chunk_start,
-    size_t* out_chunk_span,
-    char* err,
-    size_t err_sz
-) {
-    size_t idx;
-    uint32_t entry;
-    uint32_t sector_offset;
-    uint32_t sector_count;
-    size_t chunk_start;
-    size_t chunk_span;
-
-    if (!region_data || region_size < REGION_HEADER_BYTES) {
-        set_err(err, err_sz, "invalid .mca file: missing region header");
-        return 0;
-    }
-    if (chunk_x < 0 || chunk_x >= REGION_CHUNK_GRID || chunk_z < 0 || chunk_z >= REGION_CHUNK_GRID) {
-        set_err(err, err_sz, "chunk coordinates must be within 0..31");
-        return 0;
-    }
-
-    idx = (size_t)chunk_z * REGION_CHUNK_GRID + (size_t)chunk_x;
-    entry = read_be_u32(region_data + idx * 4U);
-    sector_offset = (entry >> 8) & 0x00FFFFFFU;
-    sector_count = entry & 0x000000FFU;
-
-    if (sector_offset == 0 || sector_count == 0) {
-        set_err(err, err_sz, "requested chunk is empty in this region");
-        return 0;
-    }
-    if ((uint64_t)sector_offset * REGION_SECTOR_BYTES > (uint64_t)SIZE_MAX ||
-        (uint64_t)sector_count * REGION_SECTOR_BYTES > (uint64_t)SIZE_MAX) {
-        set_err(err, err_sz, "corrupt .mca chunk location overflow");
-        return 0;
-    }
-
-    chunk_start = (size_t)sector_offset * REGION_SECTOR_BYTES;
-    chunk_span = (size_t)sector_count * REGION_SECTOR_BYTES;
-
-    if (chunk_start > region_size || chunk_span > region_size - chunk_start) {
-        set_err(err, err_sz, "corrupt .mca chunk location points outside file");
-        return 0;
-    }
-    if (out_chunk_start) *out_chunk_start = chunk_start;
-    if (out_chunk_span) *out_chunk_span = chunk_span;
-    return 1;
-}
-
-static int find_first_region_chunk(
-    const unsigned char* region_data,
-    size_t region_size,
-    int* out_chunk_x,
-    int* out_chunk_z,
-    size_t* out_chunk_start,
-    size_t* out_chunk_span,
-    char* err,
-    size_t err_sz
-) {
-    int idx;
-
-    if (!region_data || region_size < REGION_HEADER_BYTES) {
-        set_err(err, err_sz, "invalid .mca file: missing region header");
-        return 0;
-    }
-
-    for (idx = 0; idx < REGION_CHUNK_COUNT; idx++) {
-        uint32_t entry = read_be_u32(region_data + (size_t)idx * 4U);
-        uint32_t sector_offset = (entry >> 8) & 0x00FFFFFFU;
-        uint32_t sector_count = entry & 0x000000FFU;
-        if (sector_offset != 0 && sector_count != 0) {
-            int chunk_x = idx % REGION_CHUNK_GRID;
-            int chunk_z = idx / REGION_CHUNK_GRID;
-            if (!load_region_chunk_entry(region_data, region_size, chunk_x, chunk_z, out_chunk_start, out_chunk_span, err, err_sz)) {
-                return 0;
-            }
-            if (out_chunk_x) *out_chunk_x = chunk_x;
-            if (out_chunk_z) *out_chunk_z = chunk_z;
-            return 1;
-        }
-    }
-
-    set_err(err, err_sz, "no populated chunks found in .mca file");
-    return 0;
-}
-
-static unsigned char* decode_region_chunk_payload(
-    const unsigned char* region_data,
-    size_t region_size,
-    size_t chunk_start,
-    size_t chunk_span,
-    NBTInputFormat* out_format,
-    size_t* out_size,
-    char* err,
-    size_t err_sz
-) {
-    uint32_t length_field;
-    uint8_t compression_type;
-    size_t payload_size;
-    const unsigned char* payload;
-    unsigned char* out;
-
-    if (out_size) *out_size = 0;
-    if (out_format) *out_format = NBT_INPUT_FORMAT_UNKNOWN;
-
-    if (!region_data) {
-        set_err(err, err_sz, "invalid .mca buffer");
-        return NULL;
-    }
-    if (chunk_start > region_size || chunk_span > region_size - chunk_start) {
-        set_err(err, err_sz, "corrupt .mca chunk bounds");
-        return NULL;
-    }
-    if (chunk_span < 5) {
-        set_err(err, err_sz, "corrupt .mca chunk is too small");
-        return NULL;
-    }
-
-    length_field = read_be_u32(region_data + chunk_start);
-    if (length_field == 0) {
-        set_err(err, err_sz, "corrupt .mca chunk has zero length");
-        return NULL;
-    }
-    if ((size_t)length_field + 4U > chunk_span) {
-        set_err(err, err_sz, "corrupt .mca chunk length exceeds allocated sectors");
-        return NULL;
-    }
-
-    compression_type = region_data[chunk_start + 4U];
-    payload_size = (size_t)length_field - 1U;
-    payload = region_data + chunk_start + 5U;
-
-    if (payload_size > chunk_span - 5U) {
-        set_err(err, err_sz, "corrupt .mca payload length");
-        return NULL;
-    }
-
-    switch (compression_type) {
-        case 1:
-            out = inflate_buffer(payload, payload_size, 16 + MAX_WBITS, out_size);
-            if (!out) {
-                set_err(err, err_sz, "failed to decompress gzip .mca chunk payload");
-                return NULL;
-            }
-            if (out_format) *out_format = NBT_INPUT_FORMAT_GZIP;
-            return out;
-        case 2:
-            out = inflate_buffer(payload, payload_size, MAX_WBITS, out_size);
-            if (!out) {
-                set_err(err, err_sz, "failed to decompress zlib .mca chunk payload");
-                return NULL;
-            }
-            if (out_format) *out_format = NBT_INPUT_FORMAT_ZLIB;
-            return out;
-        case 3:
-            out = copy_bytes(payload, payload_size);
-            if (!out) {
-                set_err(err, err_sz, "out of memory");
-                return NULL;
-            }
-            if (out_size) *out_size = payload_size;
-            if (out_format) *out_format = NBT_INPUT_FORMAT_RAW;
-            return out;
-        default:
-            if (err && err_sz > 0) {
-                snprintf(err, err_sz, "unsupported .mca compression type %u", (unsigned int)compression_type);
-            }
-            return NULL;
-    }
 }
 
 static unsigned char* load_nbt_from_region_file(
@@ -439,50 +258,30 @@ static unsigned char* load_nbt_from_region_file(
     char* err,
     size_t err_sz
 ) {
-    unsigned char* region_data = NULL;
-    unsigned char* decoded = NULL;
-    size_t region_size = 0;
-    size_t chunk_start = 0;
-    size_t chunk_span = 0;
-    int chunk_x = 0;
-    int chunk_z = 0;
-    int have_chunk = 0;
+    RegionFile* region;
+    unsigned char* decoded;
+    int chunk_x = -1;
+    int chunk_z = -1;
 
-    region_data = read_file_bytes(filename, &region_size, err, err_sz);
-    if (!region_data) {
-        return NULL;
-    }
-    if (region_size < REGION_HEADER_BYTES) {
-        set_err(err, err_sz, "invalid .mca file: expected at least 8192-byte header");
-        free(region_data);
+    region = region_file_read(filename, err, err_sz);
+    if (!region) {
         return NULL;
     }
 
     if (opts && opts->has_chunk_coords) {
         chunk_x = opts->chunk_x;
         chunk_z = opts->chunk_z;
-        if (!load_region_chunk_entry(region_data, region_size, chunk_x, chunk_z, &chunk_start, &chunk_span, err, err_sz)) {
-            free(region_data);
-            return NULL;
-        }
-        have_chunk = 1;
     } else {
-        if (!find_first_region_chunk(region_data, region_size, &chunk_x, &chunk_z, &chunk_start, &chunk_span, err, err_sz)) {
-            free(region_data);
+        if (!region_file_find_first_populated_chunk(region, &chunk_x, &chunk_z)) {
+            set_err(err, err_sz, "no populated chunks found in .mca file");
+            region_file_free(region);
             return NULL;
         }
-        have_chunk = 1;
     }
 
-    if (!have_chunk) {
-        set_err(err, err_sz, "failed to resolve .mca chunk");
-        free(region_data);
-        return NULL;
-    }
-
-    decoded = decode_region_chunk_payload(region_data, region_size, chunk_start, chunk_span, out_info ? &out_info->input_format : NULL, out_size, err, err_sz);
-    free(region_data);
+    decoded = region_file_extract_chunk_nbt(region, chunk_x, chunk_z, out_size, out_info ? &out_info->input_format : NULL, err, err_sz);
     if (!decoded) {
+        region_file_free(region);
         return NULL;
     }
 
@@ -492,6 +291,7 @@ static unsigned char* load_nbt_from_region_file(
         out_info->chunk_z = chunk_z;
     }
 
+    region_file_free(region);
     return decoded;
 }
 

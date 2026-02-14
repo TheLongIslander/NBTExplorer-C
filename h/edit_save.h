@@ -18,6 +18,7 @@ typedef enum {
 } EditStatus;
 
 void write_tag(gzFile f, NBTTag* tag);
+int serialize_tag_to_nbt_bytes(const NBTTag* tag, unsigned char** out_data, size_t* out_size, char* err, size_t err_sz);
 EditStatus edit_tag_by_path(NBTTag* root, const char* path, const char* value_expr, char* err, size_t err_sz);
 EditStatus set_tag_by_path(NBTTag* root, const char* path, const char* value_expr, char* err, size_t err_sz);
 EditStatus delete_tag_by_path(NBTTag* root, const char* path, char* err, size_t err_sz);

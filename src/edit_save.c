@@ -201,6 +201,315 @@ void write_tag(gzFile f, NBTTag* tag) {
     write_payload(f, tag);
 }
 
+typedef struct {
+    unsigned char* data;
+    size_t size;
+    size_t capacity;
+} ByteBuffer;
+
+static void set_ser_err(char* err, size_t err_sz, const char* msg) {
+    if (err && err_sz > 0) {
+        snprintf(err, err_sz, "%s", msg);
+    }
+}
+
+static int buffer_reserve(ByteBuffer* buf, size_t extra) {
+    size_t needed;
+    size_t new_capacity;
+    unsigned char* grown;
+
+    if (!buf) return 0;
+    if (extra == 0) return 1;
+    if (buf->size > SIZE_MAX - extra) return 0;
+    needed = buf->size + extra;
+    if (needed <= buf->capacity) return 1;
+
+    new_capacity = buf->capacity ? buf->capacity : 256;
+    while (new_capacity < needed) {
+        if (new_capacity > SIZE_MAX / 2) {
+            new_capacity = needed;
+            break;
+        }
+        new_capacity *= 2;
+    }
+
+    grown = realloc(buf->data, new_capacity);
+    if (!grown) return 0;
+    buf->data = grown;
+    buf->capacity = new_capacity;
+    return 1;
+}
+
+static int buffer_write(ByteBuffer* buf, const void* data, size_t len) {
+    if (!buf) return 0;
+    if (len == 0) return 1;
+    if (!buffer_reserve(buf, len)) return 0;
+    memcpy(buf->data + buf->size, data, len);
+    buf->size += len;
+    return 1;
+}
+
+static int buffer_write_u8(ByteBuffer* buf, uint8_t value) {
+    return buffer_write(buf, &value, 1);
+}
+
+static int buffer_write_be16(ByteBuffer* buf, uint16_t value) {
+    uint8_t out[2] = {
+        (uint8_t)((value >> 8) & 0xFF),
+        (uint8_t)(value & 0xFF)
+    };
+    return buffer_write(buf, out, sizeof(out));
+}
+
+static int buffer_write_be32(ByteBuffer* buf, int32_t value) {
+    uint32_t u = (uint32_t)value;
+    uint8_t out[4] = {
+        (uint8_t)((u >> 24) & 0xFF),
+        (uint8_t)((u >> 16) & 0xFF),
+        (uint8_t)((u >> 8) & 0xFF),
+        (uint8_t)(u & 0xFF)
+    };
+    return buffer_write(buf, out, sizeof(out));
+}
+
+static int buffer_write_be64(ByteBuffer* buf, int64_t value) {
+    uint64_t u = (uint64_t)value;
+    uint8_t out[8];
+    for (int i = 0; i < 8; i++) {
+        out[7 - i] = (uint8_t)((u >> (i * 8)) & 0xFF);
+    }
+    return buffer_write(buf, out, sizeof(out));
+}
+
+static int serialize_string_to_buffer(ByteBuffer* buf, const char* str, char* err, size_t err_sz) {
+    size_t len;
+
+    if (!str) str = "";
+    len = strlen(str);
+    if (len > 0xFFFFu) {
+        set_ser_err(err, err_sz, "string too long to encode as NBT");
+        return 0;
+    }
+
+    if (!buffer_write_be16(buf, (uint16_t)len) || !buffer_write(buf, str, len)) {
+        set_ser_err(err, err_sz, "out of memory while serializing NBT");
+        return 0;
+    }
+
+    return 1;
+}
+
+static int serialize_payload_to_buffer(const NBTTag* tag, ByteBuffer* buf, char* err, size_t err_sz);
+
+static int serialize_tag_to_buffer(const NBTTag* tag, ByteBuffer* buf, char* err, size_t err_sz) {
+    if (!tag) {
+        set_ser_err(err, err_sz, "invalid null tag");
+        return 0;
+    }
+
+    if (!buffer_write_u8(buf, (uint8_t)tag->type)) {
+        set_ser_err(err, err_sz, "out of memory while serializing NBT");
+        return 0;
+    }
+
+    if (!serialize_string_to_buffer(buf, tag->name ? tag->name : "", err, err_sz)) {
+        return 0;
+    }
+
+    return serialize_payload_to_buffer(tag, buf, err, err_sz);
+}
+
+static int serialize_payload_to_buffer(const NBTTag* tag, ByteBuffer* buf, char* err, size_t err_sz) {
+    if (!tag) return 0;
+
+    switch (tag->type) {
+        case TAG_Byte:
+            if (!buffer_write_u8(buf, (uint8_t)tag->value.byte_val)) {
+                set_ser_err(err, err_sz, "out of memory while serializing TAG_Byte");
+                return 0;
+            }
+            return 1;
+
+        case TAG_Short:
+            if (!buffer_write_be16(buf, (uint16_t)tag->value.short_val)) {
+                set_ser_err(err, err_sz, "out of memory while serializing TAG_Short");
+                return 0;
+            }
+            return 1;
+
+        case TAG_Int:
+            if (!buffer_write_be32(buf, tag->value.int_val)) {
+                set_ser_err(err, err_sz, "out of memory while serializing TAG_Int");
+                return 0;
+            }
+            return 1;
+
+        case TAG_Long:
+            if (!buffer_write_be64(buf, tag->value.long_val)) {
+                set_ser_err(err, err_sz, "out of memory while serializing TAG_Long");
+                return 0;
+            }
+            return 1;
+
+        case TAG_Float: {
+            union {
+                float f;
+                uint32_t i;
+            } u;
+            u.f = tag->value.float_val;
+            if (!buffer_write_be32(buf, (int32_t)u.i)) {
+                set_ser_err(err, err_sz, "out of memory while serializing TAG_Float");
+                return 0;
+            }
+            return 1;
+        }
+
+        case TAG_Double: {
+            union {
+                double d;
+                uint64_t i;
+            } u;
+            u.d = tag->value.double_val;
+            if (!buffer_write_be64(buf, (int64_t)u.i)) {
+                set_ser_err(err, err_sz, "out of memory while serializing TAG_Double");
+                return 0;
+            }
+            return 1;
+        }
+
+        case TAG_Byte_Array: {
+            int32_t len = tag->value.byte_array.length;
+            if (len < 0) {
+                set_ser_err(err, err_sz, "invalid negative TAG_Byte_Array length");
+                return 0;
+            }
+            if (len > 0 && !tag->value.byte_array.data) {
+                set_ser_err(err, err_sz, "invalid TAG_Byte_Array data");
+                return 0;
+            }
+            if (!buffer_write_be32(buf, len) ||
+                !buffer_write(buf, tag->value.byte_array.data, (size_t)len)) {
+                set_ser_err(err, err_sz, "out of memory while serializing TAG_Byte_Array");
+                return 0;
+            }
+            return 1;
+        }
+
+        case TAG_String:
+            return serialize_string_to_buffer(buf, tag->value.string_val, err, err_sz);
+
+        case TAG_List: {
+            int32_t real_count = 0;
+            uint8_t elem_type = (uint8_t)tag->value.list.element_type;
+
+            for (int i = 0; i < tag->value.list.count; i++) {
+                if (tag->value.list.items[i] && tag->value.list.items[i]->type == tag->value.list.element_type) {
+                    real_count++;
+                }
+            }
+
+            if (!buffer_write_u8(buf, elem_type) || !buffer_write_be32(buf, real_count)) {
+                set_ser_err(err, err_sz, "out of memory while serializing TAG_List");
+                return 0;
+            }
+
+            for (int i = 0; i < tag->value.list.count; i++) {
+                if (tag->value.list.items[i] && tag->value.list.items[i]->type == tag->value.list.element_type) {
+                    if (!serialize_payload_to_buffer(tag->value.list.items[i], buf, err, err_sz)) {
+                        return 0;
+                    }
+                }
+            }
+            return 1;
+        }
+
+        case TAG_Compound:
+            for (int i = 0; i < tag->value.compound.count; i++) {
+                if (tag->value.compound.items[i]) {
+                    if (!serialize_tag_to_buffer(tag->value.compound.items[i], buf, err, err_sz)) {
+                        return 0;
+                    }
+                }
+            }
+            if (!buffer_write_u8(buf, TAG_End)) {
+                set_ser_err(err, err_sz, "out of memory while serializing TAG_Compound");
+                return 0;
+            }
+            return 1;
+
+        case TAG_Int_Array: {
+            int32_t len = tag->value.int_array.length;
+            if (len < 0) {
+                set_ser_err(err, err_sz, "invalid negative TAG_Int_Array length");
+                return 0;
+            }
+            if (len > 0 && !tag->value.int_array.data) {
+                set_ser_err(err, err_sz, "invalid TAG_Int_Array data");
+                return 0;
+            }
+            if (!buffer_write_be32(buf, len)) {
+                set_ser_err(err, err_sz, "out of memory while serializing TAG_Int_Array");
+                return 0;
+            }
+            for (int32_t i = 0; i < len; i++) {
+                if (!buffer_write_be32(buf, tag->value.int_array.data[i])) {
+                    set_ser_err(err, err_sz, "out of memory while serializing TAG_Int_Array");
+                    return 0;
+                }
+            }
+            return 1;
+        }
+
+        case TAG_Long_Array: {
+            int32_t len = tag->value.long_array.length;
+            if (len < 0) {
+                set_ser_err(err, err_sz, "invalid negative TAG_Long_Array length");
+                return 0;
+            }
+            if (len > 0 && !tag->value.long_array.data) {
+                set_ser_err(err, err_sz, "invalid TAG_Long_Array data");
+                return 0;
+            }
+            if (!buffer_write_be32(buf, len)) {
+                set_ser_err(err, err_sz, "out of memory while serializing TAG_Long_Array");
+                return 0;
+            }
+            for (int32_t i = 0; i < len; i++) {
+                if (!buffer_write_be64(buf, tag->value.long_array.data[i])) {
+                    set_ser_err(err, err_sz, "out of memory while serializing TAG_Long_Array");
+                    return 0;
+                }
+            }
+            return 1;
+        }
+
+        default:
+            set_ser_err(err, err_sz, "unsupported tag type while serializing NBT");
+            return 0;
+    }
+}
+
+int serialize_tag_to_nbt_bytes(const NBTTag* tag, unsigned char** out_data, size_t* out_size, char* err, size_t err_sz) {
+    ByteBuffer buf = {0};
+
+    if (out_data) *out_data = NULL;
+    if (out_size) *out_size = 0;
+
+    if (!tag || !out_data || !out_size) {
+        set_ser_err(err, err_sz, "invalid serialize arguments");
+        return 0;
+    }
+
+    if (!serialize_tag_to_buffer(tag, &buf, err, err_sz)) {
+        free(buf.data);
+        return 0;
+    }
+
+    *out_data = buf.data;
+    *out_size = buf.size;
+    return 1;
+}
+
 const char* edit_status_name(EditStatus status) {
     switch (status) {
         case EDIT_OK:
