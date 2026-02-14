@@ -13,12 +13,16 @@
 typedef enum {
     MODE_DEFAULT = 0,
     MODE_EDIT,
+    MODE_SET,
+    MODE_DELETE,
     MODE_DUMP
 } CliMode;
 
 static void print_usage(const char* prog) {
     printf("Usage:\n");
     printf("  %s <file.dat> [--edit path newValue] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
+    printf("  %s <file.dat> [--set path newValue] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
+    printf("  %s <file.dat> [--delete path] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
     printf("  %s <file.dat> [--dump output.txt]\n", prog);
 }
 
@@ -167,8 +171,8 @@ static int write_nbt_atomically(const char* target_path, NBTTag* root, char* err
 int main(int argc, char* argv[]) {
     CliMode mode = MODE_DEFAULT;
     const char* input_path;
-    const char* edit_path = NULL;
-    const char* edit_value = NULL;
+    const char* op_path = NULL;
+    const char* op_value = NULL;
     const char* dump_path = NULL;
     const char* output_path = NULL;
     const char* backup_suffix = ".bak";
@@ -191,8 +195,29 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             mode = MODE_EDIT;
-            edit_path = argv[++i];
-            edit_value = argv[++i];
+            op_path = argv[++i];
+            op_value = argv[++i];
+            continue;
+        }
+
+        if (strcmp(arg, "--set") == 0) {
+            if (mode != MODE_DEFAULT || i + 2 >= argc) {
+                print_usage(argv[0]);
+                return 1;
+            }
+            mode = MODE_SET;
+            op_path = argv[++i];
+            op_value = argv[++i];
+            continue;
+        }
+
+        if (strcmp(arg, "--delete") == 0) {
+            if (mode != MODE_DEFAULT || i + 1 >= argc) {
+                print_usage(argv[0]);
+                return 1;
+            }
+            mode = MODE_DELETE;
+            op_path = argv[++i];
             continue;
         }
 
@@ -242,22 +267,22 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (mode != MODE_EDIT && (output_path || in_place || backup_enabled)) {
-        fprintf(stderr, "--output/--in-place/--backup are only valid with --edit\n");
+    if (mode != MODE_EDIT && mode != MODE_SET && mode != MODE_DELETE && (output_path || in_place || backup_enabled)) {
+        fprintf(stderr, "--output/--in-place/--backup are only valid with --edit/--set/--delete\n");
         return 1;
     }
 
-    if (mode == MODE_EDIT && output_path && in_place) {
+    if ((mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) && output_path && in_place) {
         fprintf(stderr, "Use either --output or --in-place, not both\n");
         return 1;
     }
 
-    if (mode == MODE_EDIT && backup_enabled && !in_place) {
+    if ((mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) && backup_enabled && !in_place) {
         fprintf(stderr, "--backup is only valid with --in-place\n");
         return 1;
     }
 
-    if (mode == MODE_EDIT && backup_enabled && backup_suffix[0] == '\0') {
+    if ((mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) && backup_enabled && backup_suffix[0] == '\0') {
         fprintf(stderr, "Backup suffix cannot be empty\n");
         return 1;
     }
@@ -298,24 +323,43 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (mode == MODE_EDIT) {
+    if (mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) {
         char err[256] = {0};
         char io_err[256] = {0};
         char* backup_path = NULL;
         const char* write_path = "modified_output.dat";
+        const char* op_name = NULL;
+        EditStatus st;
 
-        EditStatus st = edit_tag_by_path(root, edit_path, edit_value, err, sizeof(err));
+        if (mode == MODE_EDIT) {
+            op_name = "edit";
+            st = edit_tag_by_path(root, op_path, op_value, err, sizeof(err));
+        } else if (mode == MODE_SET) {
+            op_name = "set";
+            st = set_tag_by_path(root, op_path, op_value, err, sizeof(err));
+        } else {
+            op_name = "delete";
+            st = delete_tag_by_path(root, op_path, err, sizeof(err));
+        }
+
         if (st != EDIT_OK) {
             if (err[0] != '\0') {
-                printf("Failed to edit path '%s': %s (%s)\n", edit_path, err, edit_status_name(st));
+                printf("Failed to %s path '%s': %s (%s)\n", op_name, op_path, err, edit_status_name(st));
             } else {
-                printf("Failed to edit path '%s': %s\n", edit_path, edit_status_name(st));
+                printf("Failed to %s path '%s': %s\n", op_name, op_path, edit_status_name(st));
             }
             free(data);
             free_nbt_tree(root);
             return 1;
         }
-        printf("Updated %s successfully\n", edit_path);
+
+        if (mode == MODE_DELETE) {
+            printf("Deleted %s successfully\n", op_path);
+        } else if (mode == MODE_SET) {
+            printf("Set %s successfully\n", op_path);
+        } else {
+            printf("Updated %s successfully\n", op_path);
+        }
 
         if (in_place) {
             write_path = input_path;

@@ -426,13 +426,13 @@ static void free_list_items(NBTTag** items, int count) {
     free(items);
 }
 
-static NBTTag* create_list_element(TagType type) {
+static NBTTag* create_named_tag(TagType type, const char* name) {
     NBTTag* tag = malloc(sizeof(NBTTag));
     if (!tag) return NULL;
 
     memset(tag, 0, sizeof(NBTTag));
     tag->type = type;
-    tag->name = strdup("");
+    tag->name = strdup(name ? name : "");
     if (!tag->name) {
         free(tag);
         return NULL;
@@ -450,6 +450,10 @@ static NBTTag* create_list_element(TagType type) {
     }
 
     return tag;
+}
+
+static NBTTag* create_list_element(TagType type) {
+    return create_named_tag(type, "");
 }
 
 static EditStatus parse_token_into_tag(NBTTag* target, const JsonDoc* doc, int tok_index, char* err, size_t err_sz);
@@ -823,6 +827,288 @@ static EditStatus apply_legacy_scalar_edit(NBTTag* target, const char* value_exp
     }
 }
 
+static int append_compound_item(NBTTag* compound, NBTTag* child) {
+    int new_count;
+    NBTTag** new_items;
+
+    if (!compound || compound->type != TAG_Compound || !child) return 0;
+
+    new_count = compound->value.compound.count + 1;
+    new_items = realloc(compound->value.compound.items, (size_t)new_count * sizeof(NBTTag*));
+    if (!new_items) return 0;
+
+    compound->value.compound.items = new_items;
+    compound->value.compound.items[new_count - 1] = child;
+    compound->value.compound.count = new_count;
+    return 1;
+}
+
+static EditStatus infer_primitive_tag_type(const JsonDoc* doc, int tok_index, TagType* out_type, char* err, size_t err_sz) {
+    char* text;
+    char* end;
+    long long val;
+
+    if (!doc || !out_type || tok_index < 0 || tok_index >= doc->count || doc->tokens[tok_index].type != JSMN_PRIMITIVE) {
+        set_err(err, err_sz, "invalid primitive value");
+        return EDIT_ERR_INVALID_JSON;
+    }
+
+    text = token_to_text(doc, tok_index);
+    if (!text) {
+        set_err(err, err_sz, "out of memory");
+        return EDIT_ERR_MEMORY;
+    }
+
+    if (is_primitive_bool_or_null(text)) {
+        free(text);
+        set_err(err, err_sz, "type mismatch: boolean/null values are not supported for NBT tags");
+        return EDIT_ERR_TYPE_MISMATCH;
+    }
+
+    if (strchr(text, '.') || strchr(text, 'e') || strchr(text, 'E')) {
+        *out_type = TAG_Double;
+        free(text);
+        return EDIT_OK;
+    }
+
+    errno = 0;
+    val = strtoll(text, &end, 10);
+    if (errno == ERANGE) {
+        free(text);
+        set_err(err, err_sz, "numeric overflow");
+        return EDIT_ERR_NUMERIC_RANGE;
+    }
+    if (end == text || *end != '\0') {
+        free(text);
+        set_err(err, err_sz, "type mismatch: expected JSON number");
+        return EDIT_ERR_TYPE_MISMATCH;
+    }
+
+    if (val >= INT32_MIN && val <= INT32_MAX) *out_type = TAG_Int;
+    else *out_type = TAG_Long;
+
+    free(text);
+    return EDIT_OK;
+}
+
+static EditStatus infer_array_tag_type(const JsonDoc* doc, int arr_tok, TagType* out_type, TagType* out_list_elem_type, char* err, size_t err_sz) {
+    int count;
+    int child;
+    int saw_string = 0;
+    int saw_number = 0;
+    int saw_float = 0;
+    int64_t min_i64 = INT64_MAX;
+    int64_t max_i64 = INT64_MIN;
+
+    if (!doc || !out_type || !out_list_elem_type || arr_tok < 0 || arr_tok >= doc->count || doc->tokens[arr_tok].type != JSMN_ARRAY) {
+        set_err(err, err_sz, "invalid JSON array");
+        return EDIT_ERR_INVALID_JSON;
+    }
+
+    count = count_array_elements(doc, arr_tok);
+    if (count == 0) {
+        set_err(err, err_sz, "unsupported operation: cannot infer NBT type from empty JSON array");
+        return EDIT_ERR_UNSUPPORTED;
+    }
+
+    child = arr_tok + 1;
+    for (int i = 0; i < count; i++) {
+        jsmntok_t tok = doc->tokens[child];
+
+        if (tok.type == JSMN_STRING) {
+            saw_string = 1;
+        } else if (tok.type == JSMN_PRIMITIVE) {
+            char* text = token_to_text(doc, child);
+            char* end;
+            long long val;
+
+            if (!text) {
+                set_err(err, err_sz, "out of memory");
+                return EDIT_ERR_MEMORY;
+            }
+
+            if (is_primitive_bool_or_null(text)) {
+                free(text);
+                set_err(err, err_sz, "type mismatch: boolean/null values are not supported for NBT arrays");
+                return EDIT_ERR_TYPE_MISMATCH;
+            }
+
+            saw_number = 1;
+            if (strchr(text, '.') || strchr(text, 'e') || strchr(text, 'E')) {
+                saw_float = 1;
+            } else {
+                errno = 0;
+                val = strtoll(text, &end, 10);
+                if (errno == ERANGE) {
+                    free(text);
+                    set_err(err, err_sz, "numeric overflow");
+                    return EDIT_ERR_NUMERIC_RANGE;
+                }
+                if (end == text || *end != '\0') {
+                    free(text);
+                    set_err(err, err_sz, "type mismatch: expected JSON number");
+                    return EDIT_ERR_TYPE_MISMATCH;
+                }
+                if ((int64_t)val < min_i64) min_i64 = (int64_t)val;
+                if ((int64_t)val > max_i64) max_i64 = (int64_t)val;
+            }
+
+            free(text);
+        } else {
+            set_err(err, err_sz, "unsupported operation: arrays of objects/lists are not supported for new tags");
+            return EDIT_ERR_UNSUPPORTED;
+        }
+
+        child = token_span(doc, child);
+    }
+
+    if (saw_string && saw_number) {
+        set_err(err, err_sz, "type mismatch: mixed string/number arrays are not supported");
+        return EDIT_ERR_TYPE_MISMATCH;
+    }
+
+    if (saw_string) {
+        *out_type = TAG_List;
+        *out_list_elem_type = TAG_String;
+        return EDIT_OK;
+    }
+
+    if (!saw_number) {
+        set_err(err, err_sz, "invalid JSON array");
+        return EDIT_ERR_INVALID_JSON;
+    }
+
+    if (saw_float) {
+        *out_type = TAG_List;
+        *out_list_elem_type = TAG_Double;
+        return EDIT_OK;
+    }
+
+    if (min_i64 >= -128 && max_i64 <= 127) {
+        *out_type = TAG_Byte_Array;
+    } else if (min_i64 >= INT32_MIN && max_i64 <= INT32_MAX) {
+        *out_type = TAG_Int_Array;
+    } else {
+        *out_type = TAG_Long_Array;
+    }
+
+    *out_list_elem_type = TAG_End;
+    return EDIT_OK;
+}
+
+static EditStatus create_tag_from_token(const char* tag_name, const JsonDoc* doc, int tok_index, NBTTag** out_tag, char* err, size_t err_sz);
+
+static EditStatus build_compound_from_object(NBTTag* compound, const JsonDoc* doc, int obj_tok, char* err, size_t err_sz) {
+    int child;
+    jsmntok_t root;
+
+    if (!compound || compound->type != TAG_Compound || !doc || obj_tok < 0 || obj_tok >= doc->count) {
+        set_err(err, err_sz, "invalid compound target");
+        return EDIT_ERR_INVALID_JSON;
+    }
+
+    root = doc->tokens[obj_tok];
+    if (root.type != JSMN_OBJECT) {
+        set_err(err, err_sz, "type mismatch: expected JSON object");
+        return EDIT_ERR_TYPE_MISMATCH;
+    }
+
+    child = obj_tok + 1;
+    while (child < doc->count && doc->tokens[child].start < root.end) {
+        int key_tok = child;
+        int value_tok;
+        char* key = NULL;
+        NBTTag* child_tag = NULL;
+        EditStatus st;
+
+        if (doc->tokens[key_tok].type != JSMN_STRING) {
+            set_err(err, err_sz, "invalid JSON object key");
+            return EDIT_ERR_INVALID_JSON;
+        }
+
+        child = token_span(doc, key_tok);
+        if (child >= doc->count || doc->tokens[child].start >= root.end) {
+            set_err(err, err_sz, "invalid JSON object: missing value");
+            return EDIT_ERR_INVALID_JSON;
+        }
+
+        value_tok = child;
+        child = token_span(doc, value_tok);
+
+        st = token_to_decoded_string(doc, key_tok, &key, err, err_sz);
+        if (st != EDIT_OK) return st;
+
+        st = create_tag_from_token(key, doc, value_tok, &child_tag, err, err_sz);
+        free(key);
+        if (st != EDIT_OK) return st;
+
+        if (!append_compound_item(compound, child_tag)) {
+            free_nbt_tree(child_tag);
+            set_err(err, err_sz, "out of memory");
+            return EDIT_ERR_MEMORY;
+        }
+    }
+
+    return EDIT_OK;
+}
+
+static EditStatus create_tag_from_token(const char* tag_name, const JsonDoc* doc, int tok_index, NBTTag** out_tag, char* err, size_t err_sz) {
+    NBTTag* tag;
+    TagType type = TAG_End;
+    TagType list_elem_type = TAG_End;
+    EditStatus st;
+    jsmntok_t tok;
+
+    if (!doc || !out_tag || tok_index < 0 || tok_index >= doc->count) {
+        set_err(err, err_sz, "invalid JSON token");
+        return EDIT_ERR_INVALID_JSON;
+    }
+
+    tok = doc->tokens[tok_index];
+    switch (tok.type) {
+        case JSMN_STRING:
+            type = TAG_String;
+            break;
+        case JSMN_PRIMITIVE:
+            st = infer_primitive_tag_type(doc, tok_index, &type, err, err_sz);
+            if (st != EDIT_OK) return st;
+            break;
+        case JSMN_ARRAY:
+            st = infer_array_tag_type(doc, tok_index, &type, &list_elem_type, err, err_sz);
+            if (st != EDIT_OK) return st;
+            break;
+        case JSMN_OBJECT:
+            type = TAG_Compound;
+            break;
+        default:
+            set_err(err, err_sz, "unsupported JSON token");
+            return EDIT_ERR_UNSUPPORTED;
+    }
+
+    tag = create_named_tag(type, tag_name);
+    if (!tag) {
+        set_err(err, err_sz, "out of memory");
+        return EDIT_ERR_MEMORY;
+    }
+
+    if (type == TAG_Compound) {
+        st = build_compound_from_object(tag, doc, tok_index, err, err_sz);
+    } else if (type == TAG_List) {
+        tag->value.list.element_type = list_elem_type;
+        st = parse_token_into_tag(tag, doc, tok_index, err, err_sz);
+    } else {
+        st = parse_token_into_tag(tag, doc, tok_index, err, err_sz);
+    }
+
+    if (st != EDIT_OK) {
+        free_nbt_tree(tag);
+        return st;
+    }
+
+    *out_tag = tag;
+    return EDIT_OK;
+}
+
 EditStatus parse_json_for_tag_type(NBTTag* target, const char* value_expr, char* err, size_t err_sz) {
     EditStatus st;
     JsonDoc doc;
@@ -959,4 +1245,23 @@ EditStatus parse_json_for_array_element(NBTTag* array_tag, int index, const char
             set_err(err, err_sz, "type mismatch: target is not an editable array");
             return EDIT_ERR_TYPE_MISMATCH;
     }
+}
+
+EditStatus create_tag_from_json_expr(const char* tag_name, const char* value_expr, NBTTag** out_tag, char* err, size_t err_sz) {
+    JsonDoc doc;
+    EditStatus st;
+
+    if (!tag_name || !value_expr || !out_tag) {
+        set_err(err, err_sz, "invalid create tag arguments");
+        return EDIT_ERR_PATH_SYNTAX;
+    }
+
+    *out_tag = NULL;
+
+    st = parse_json_doc(value_expr, &doc, err, err_sz);
+    if (st != EDIT_OK) return st;
+
+    st = create_tag_from_token(tag_name, &doc, 0, out_tag, err, err_sz);
+    free_json_doc(&doc);
+    return st;
 }

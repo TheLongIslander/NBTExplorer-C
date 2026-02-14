@@ -19,6 +19,8 @@ typedef enum {
 
 void write_tag(gzFile f, NBTTag* tag);
 EditStatus edit_tag_by_path(NBTTag* root, const char* path, const char* value_expr, char* err, size_t err_sz);
+EditStatus set_tag_by_path(NBTTag* root, const char* path, const char* value_expr, char* err, size_t err_sz);
+EditStatus delete_tag_by_path(NBTTag* root, const char* path, char* err, size_t err_sz);
 const char* edit_status_name(EditStatus status);
 
 /* Backward-compat utility: returns only direct tag targets. */

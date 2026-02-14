@@ -5,6 +5,7 @@
 #include "edit_path.h"
 #include "edit_save.h"
 #include "edit_value.h"
+#include "nbt_builder.h"
 
 static void write_payload(gzFile f, NBTTag* tag);
 
@@ -224,6 +225,370 @@ const char* edit_status_name(EditStatus status) {
     }
 }
 
+static void set_err(char* err, size_t err_sz, const char* msg) {
+    if (err && err_sz > 0) {
+        snprintf(err, err_sz, "%s", msg);
+    }
+}
+
+static NBTTag* path_target_to_tag(const PathTarget* target, char* err, size_t err_sz) {
+    if (!target) {
+        set_err(err, err_sz, "invalid path target");
+        return NULL;
+    }
+
+    if (target->kind == PATH_TARGET_TAG) {
+        return target->tag;
+    }
+
+    if (target->kind == PATH_TARGET_LIST_ELEMENT) {
+        if (!target->tag || target->tag->type != TAG_List) {
+            set_err(err, err_sz, "type mismatch: path does not resolve to a tag");
+            return NULL;
+        }
+        if (target->index < 0 || target->index >= target->tag->value.list.count) {
+            set_err(err, err_sz, "index out of bounds");
+            return NULL;
+        }
+        return target->tag->value.list.items[target->index];
+    }
+
+    set_err(err, err_sz, "type mismatch: path does not resolve to a tag");
+    return NULL;
+}
+
+static NBTTag* find_child_by_name(NBTTag* compound, const char* name, int* out_index) {
+    if (!compound || compound->type != TAG_Compound || !name) return NULL;
+
+    for (int i = 0; i < compound->value.compound.count; i++) {
+        NBTTag* child = compound->value.compound.items[i];
+        if (child && child->name && strcmp(child->name, name) == 0) {
+            if (out_index) *out_index = i;
+            return child;
+        }
+    }
+
+    return NULL;
+}
+
+static int append_compound_child(NBTTag* compound, NBTTag* child) {
+    int new_count;
+    NBTTag** new_items;
+
+    if (!compound || compound->type != TAG_Compound || !child) return 0;
+
+    new_count = compound->value.compound.count + 1;
+    new_items = realloc(compound->value.compound.items, (size_t)new_count * sizeof(NBTTag*));
+    if (!new_items) return 0;
+
+    compound->value.compound.items = new_items;
+    compound->value.compound.items[new_count - 1] = child;
+    compound->value.compound.count = new_count;
+    return 1;
+}
+
+static void remove_compound_child_at(NBTTag* compound, int index) {
+    int count;
+    NBTTag** new_items;
+
+    if (!compound || compound->type != TAG_Compound) return;
+
+    count = compound->value.compound.count;
+    if (index < 0 || index >= count) return;
+
+    free_nbt_tree(compound->value.compound.items[index]);
+    if (index < count - 1) {
+        memmove(
+            &compound->value.compound.items[index],
+            &compound->value.compound.items[index + 1],
+            (size_t)(count - index - 1) * sizeof(NBTTag*)
+        );
+    }
+
+    count--;
+    compound->value.compound.count = count;
+
+    if (count == 0) {
+        free(compound->value.compound.items);
+        compound->value.compound.items = NULL;
+        return;
+    }
+
+    new_items = realloc(compound->value.compound.items, (size_t)count * sizeof(NBTTag*));
+    if (new_items) {
+        compound->value.compound.items = new_items;
+    }
+}
+
+static EditStatus split_parent_and_key(NBTTag* root, const char* path, char** out_parent_path, char** out_key, char* err, size_t err_sz) {
+    char* copy;
+    char* save;
+    char* tok;
+    char* segments[256];
+    int count = 0;
+    int start = 0;
+    char* parent_path = NULL;
+    char* key = NULL;
+
+    if (!root || !path || !out_parent_path || !out_key) {
+        set_err(err, err_sz, "invalid path argument");
+        return EDIT_ERR_PATH_SYNTAX;
+    }
+
+    *out_parent_path = NULL;
+    *out_key = NULL;
+
+    copy = strdup(path);
+    if (!copy) {
+        set_err(err, err_sz, "out of memory");
+        return EDIT_ERR_MEMORY;
+    }
+
+    for (tok = strtok_r(copy, "/", &save); tok; tok = strtok_r(NULL, "/", &save)) {
+        if (tok[0] == '\0') continue;
+        if (count >= (int)(sizeof(segments) / sizeof(segments[0]))) {
+            free(copy);
+            set_err(err, err_sz, "invalid path syntax: too many segments");
+            return EDIT_ERR_PATH_SYNTAX;
+        }
+        segments[count++] = tok;
+    }
+
+    if (count == 0) {
+        free(copy);
+        set_err(err, err_sz, "invalid path syntax");
+        return EDIT_ERR_PATH_SYNTAX;
+    }
+
+    if (root->name && root->name[0] != '\0' && strcmp(segments[0], root->name) == 0) {
+        start = 1;
+    }
+
+    if (start >= count) {
+        free(copy);
+        set_err(err, err_sz, "unsupported operation: cannot target root path");
+        return EDIT_ERR_UNSUPPORTED;
+    }
+
+    if (strchr(segments[count - 1], '[') || strchr(segments[count - 1], ']')) {
+        free(copy);
+        set_err(err, err_sz, "unsupported operation: create/delete requires a named tag path");
+        return EDIT_ERR_UNSUPPORTED;
+    }
+
+    key = strdup(segments[count - 1]);
+    if (!key) {
+        free(copy);
+        set_err(err, err_sz, "out of memory");
+        return EDIT_ERR_MEMORY;
+    }
+
+    if (count - start > 1) {
+        size_t len = 0;
+        size_t pos = 0;
+
+        for (int i = start; i < count - 1; i++) {
+            len += strlen(segments[i]) + 1;
+        }
+
+        parent_path = malloc(len + 1);
+        if (!parent_path) {
+            free(key);
+            free(copy);
+            set_err(err, err_sz, "out of memory");
+            return EDIT_ERR_MEMORY;
+        }
+
+        parent_path[0] = '\0';
+        for (int i = start; i < count - 1; i++) {
+            size_t slen = strlen(segments[i]);
+            memcpy(parent_path + pos, segments[i], slen);
+            pos += slen;
+            if (i < count - 2) {
+                parent_path[pos++] = '/';
+            }
+        }
+        parent_path[pos] = '\0';
+    }
+
+    *out_parent_path = parent_path;
+    *out_key = key;
+    free(copy);
+    return EDIT_OK;
+}
+
+static EditStatus resolve_parent_compound(NBTTag* root, const char* parent_path, NBTTag** out_parent, char* err, size_t err_sz) {
+    PathTarget target;
+    NBTTag* parent;
+    EditStatus st;
+
+    if (!root || !out_parent) {
+        set_err(err, err_sz, "invalid parent resolution");
+        return EDIT_ERR_PATH_SYNTAX;
+    }
+
+    if (!parent_path || parent_path[0] == '\0') {
+        parent = root;
+    } else {
+        st = resolve_edit_path(root, parent_path, &target, err, err_sz);
+        if (st != EDIT_OK) return st;
+
+        parent = path_target_to_tag(&target, err, err_sz);
+        if (!parent) return EDIT_ERR_TYPE_MISMATCH;
+    }
+
+    if (parent->type != TAG_Compound) {
+        set_err(err, err_sz, "type mismatch: parent path is not a compound");
+        return EDIT_ERR_TYPE_MISMATCH;
+    }
+
+    *out_parent = parent;
+    return EDIT_OK;
+}
+
+static EditStatus delete_list_element(NBTTag* list_tag, int index, char* err, size_t err_sz) {
+    int new_count;
+    NBTTag** new_items;
+
+    if (!list_tag || list_tag->type != TAG_List) {
+        set_err(err, err_sz, "type mismatch: target is not a list");
+        return EDIT_ERR_TYPE_MISMATCH;
+    }
+
+    if (index < 0 || index >= list_tag->value.list.count) {
+        set_err(err, err_sz, "index out of bounds");
+        return EDIT_ERR_INDEX_BOUNDS;
+    }
+
+    free_nbt_tree(list_tag->value.list.items[index]);
+    if (index < list_tag->value.list.count - 1) {
+        memmove(
+            &list_tag->value.list.items[index],
+            &list_tag->value.list.items[index + 1],
+            (size_t)(list_tag->value.list.count - index - 1) * sizeof(NBTTag*)
+        );
+    }
+
+    new_count = list_tag->value.list.count - 1;
+    list_tag->value.list.count = new_count;
+
+    if (new_count == 0) {
+        free(list_tag->value.list.items);
+        list_tag->value.list.items = NULL;
+        return EDIT_OK;
+    }
+
+    new_items = realloc(list_tag->value.list.items, (size_t)new_count * sizeof(NBTTag*));
+    if (new_items) {
+        list_tag->value.list.items = new_items;
+    }
+
+    return EDIT_OK;
+}
+
+static EditStatus delete_array_element(NBTTag* array_tag, int index, char* err, size_t err_sz) {
+    if (!array_tag) {
+        set_err(err, err_sz, "invalid array target");
+        return EDIT_ERR_TYPE_MISMATCH;
+    }
+
+    switch (array_tag->type) {
+        case TAG_Byte_Array: {
+            int len = array_tag->value.byte_array.length;
+            uint8_t* new_data;
+
+            if (index < 0 || index >= len) {
+                set_err(err, err_sz, "index out of bounds");
+                return EDIT_ERR_INDEX_BOUNDS;
+            }
+
+            if (index < len - 1) {
+                memmove(
+                    &array_tag->value.byte_array.data[index],
+                    &array_tag->value.byte_array.data[index + 1],
+                    (size_t)(len - index - 1)
+                );
+            }
+            len--;
+            array_tag->value.byte_array.length = len;
+
+            if (len == 0) {
+                free(array_tag->value.byte_array.data);
+                array_tag->value.byte_array.data = NULL;
+                return EDIT_OK;
+            }
+
+            new_data = realloc(array_tag->value.byte_array.data, (size_t)len);
+            if (new_data) array_tag->value.byte_array.data = new_data;
+            return EDIT_OK;
+        }
+
+        case TAG_Int_Array: {
+            int len = array_tag->value.int_array.length;
+            int32_t* new_data;
+
+            if (index < 0 || index >= len) {
+                set_err(err, err_sz, "index out of bounds");
+                return EDIT_ERR_INDEX_BOUNDS;
+            }
+
+            if (index < len - 1) {
+                memmove(
+                    &array_tag->value.int_array.data[index],
+                    &array_tag->value.int_array.data[index + 1],
+                    (size_t)(len - index - 1) * sizeof(int32_t)
+                );
+            }
+            len--;
+            array_tag->value.int_array.length = len;
+
+            if (len == 0) {
+                free(array_tag->value.int_array.data);
+                array_tag->value.int_array.data = NULL;
+                return EDIT_OK;
+            }
+
+            new_data = realloc(array_tag->value.int_array.data, (size_t)len * sizeof(int32_t));
+            if (new_data) array_tag->value.int_array.data = new_data;
+            return EDIT_OK;
+        }
+
+        case TAG_Long_Array: {
+            int len = array_tag->value.long_array.length;
+            int64_t* new_data;
+
+            if (index < 0 || index >= len) {
+                set_err(err, err_sz, "index out of bounds");
+                return EDIT_ERR_INDEX_BOUNDS;
+            }
+
+            if (index < len - 1) {
+                memmove(
+                    &array_tag->value.long_array.data[index],
+                    &array_tag->value.long_array.data[index + 1],
+                    (size_t)(len - index - 1) * sizeof(int64_t)
+                );
+            }
+            len--;
+            array_tag->value.long_array.length = len;
+
+            if (len == 0) {
+                free(array_tag->value.long_array.data);
+                array_tag->value.long_array.data = NULL;
+                return EDIT_OK;
+            }
+
+            new_data = realloc(array_tag->value.long_array.data, (size_t)len * sizeof(int64_t));
+            if (new_data) array_tag->value.long_array.data = new_data;
+            return EDIT_OK;
+        }
+
+        default:
+            set_err(err, err_sz, "type mismatch: target is not an editable array");
+            return EDIT_ERR_TYPE_MISMATCH;
+    }
+}
+
 NBTTag* find_tag_by_path(NBTTag* root, const char* path) {
     PathTarget target;
     char err[128];
@@ -271,6 +636,112 @@ EditStatus edit_tag_by_path(NBTTag* root, const char* path, const char* value_ex
             if (err && err_sz > 0) {
                 snprintf(err, err_sz, "unsupported path target kind");
             }
+            return EDIT_ERR_UNSUPPORTED;
+    }
+}
+
+EditStatus set_tag_by_path(NBTTag* root, const char* path, const char* value_expr, char* err, size_t err_sz) {
+    EditStatus st;
+    char* parent_path = NULL;
+    char* key = NULL;
+    NBTTag* parent = NULL;
+    NBTTag* existing = NULL;
+    NBTTag* new_tag = NULL;
+
+    st = edit_tag_by_path(root, path, value_expr, err, err_sz);
+    if (st == EDIT_OK) return EDIT_OK;
+    if (st != EDIT_ERR_PATH_NOT_FOUND) return st;
+
+    st = split_parent_and_key(root, path, &parent_path, &key, err, err_sz);
+    if (st != EDIT_OK) goto done;
+
+    st = resolve_parent_compound(root, parent_path, &parent, err, err_sz);
+    if (st != EDIT_OK) goto done;
+
+    existing = find_child_by_name(parent, key, NULL);
+    if (existing) {
+        st = parse_json_for_tag_type(existing, value_expr, err, err_sz);
+        goto done;
+    }
+
+    st = create_tag_from_json_expr(key, value_expr, &new_tag, err, err_sz);
+    if (st != EDIT_OK) goto done;
+
+    if (!append_compound_child(parent, new_tag)) {
+        free_nbt_tree(new_tag);
+        set_err(err, err_sz, "out of memory");
+        st = EDIT_ERR_MEMORY;
+        goto done;
+    }
+
+    st = EDIT_OK;
+
+done:
+    free(parent_path);
+    free(key);
+    return st;
+}
+
+EditStatus delete_tag_by_path(NBTTag* root, const char* path, char* err, size_t err_sz) {
+    PathTarget target;
+    EditStatus st;
+
+    if (!root || !path) {
+        set_err(err, err_sz, "invalid delete arguments");
+        return EDIT_ERR_PATH_SYNTAX;
+    }
+
+    st = resolve_edit_path(root, path, &target, err, err_sz);
+    if (st != EDIT_OK) return st;
+
+    switch (target.kind) {
+        case PATH_TARGET_LIST_ELEMENT:
+            return delete_list_element(target.tag, target.index, err, err_sz);
+
+        case PATH_TARGET_BYTE_ARRAY_ELEMENT:
+        case PATH_TARGET_INT_ARRAY_ELEMENT:
+        case PATH_TARGET_LONG_ARRAY_ELEMENT:
+            return delete_array_element(target.tag, target.index, err, err_sz);
+
+        case PATH_TARGET_TAG: {
+            char* parent_path = NULL;
+            char* key = NULL;
+            NBTTag* parent = NULL;
+            int index = -1;
+            NBTTag* found;
+
+            if (target.tag == root) {
+                set_err(err, err_sz, "unsupported operation: cannot delete root tag");
+                return EDIT_ERR_UNSUPPORTED;
+            }
+
+            st = split_parent_and_key(root, path, &parent_path, &key, err, err_sz);
+            if (st != EDIT_OK) {
+                free(parent_path);
+                free(key);
+                return st;
+            }
+
+            st = resolve_parent_compound(root, parent_path, &parent, err, err_sz);
+            free(parent_path);
+            if (st != EDIT_OK) {
+                free(key);
+                return st;
+            }
+
+            found = find_child_by_name(parent, key, &index);
+            free(key);
+            if (!found || index < 0) {
+                set_err(err, err_sz, "path not found");
+                return EDIT_ERR_PATH_NOT_FOUND;
+            }
+
+            remove_compound_child_at(parent, index);
+            return EDIT_OK;
+        }
+
+        default:
+            set_err(err, err_sz, "unsupported operation");
             return EDIT_ERR_UNSUPPORTED;
     }
 }
