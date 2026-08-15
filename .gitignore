@@ -18,3 +18,5 @@ AppDir/
 /region_file.plist
 /region_read.plist
 /region_write.plist
+__pycache__/
+*.py[cod]

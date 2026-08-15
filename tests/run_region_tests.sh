@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 BIN="${BIN:-./bin/nbt_explorer}"
-MCA_FILE="${MCA_FILE:-r.-9.3.mca}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nbt_region_tests.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -15,13 +14,18 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$MCA_FILE" ]]; then
-  echo "Skip region tests: missing fixture $MCA_FILE"
-  exit 0
-fi
-
 if ! command -v python3 >/dev/null 2>&1; then
   echo "Missing dependency: python3"
+  exit 1
+fi
+
+if [[ -z "${MCA_FILE:-}" ]]; then
+  MCA_FILE="$TMP_DIR/r.0.0.mca"
+  python3 tests/generate_test_fixtures.py region "$MCA_FILE"
+fi
+
+if [[ ! -f "$MCA_FILE" ]]; then
+  echo "Missing region fixture: $MCA_FILE"
   exit 1
 fi
 

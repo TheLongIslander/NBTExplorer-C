@@ -5,15 +5,23 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 BIN="${BIN:-./bin/nbt_explorer}"
-INPUT="${1:-level.dat}"
 ITERATIONS="${ITERATIONS:-80}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nbt_fuzz.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
+INPUT="${1:-$TMP_DIR/level.dat}"
 
 if [[ ! -x "$BIN" ]]; then
   echo "Missing binary: $BIN"
   echo "Run: make"
   exit 1
+fi
+
+if [[ $# -eq 0 ]]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "Missing dependency: python3"
+    exit 1
+  fi
+  python3 tests/generate_test_fixtures.py level "$INPUT"
 fi
 
 if [[ ! -f "$INPUT" ]]; then

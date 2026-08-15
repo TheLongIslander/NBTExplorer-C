@@ -5,9 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 BIN="${BIN:-./bin/nbt_explorer}"
-INPUT="${1:-level.dat}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nbt_format_tests.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
+INPUT="${1:-$TMP_DIR/level.dat}"
 
 if [[ ! -x "$BIN" ]]; then
   echo "Missing binary: $BIN"
@@ -15,13 +15,17 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$INPUT" ]]; then
-  echo "Missing input fixture: $INPUT"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Missing dependency: python3 (required for zlib fixture generation)"
   exit 1
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "Missing dependency: python3 (required for zlib fixture generation)"
+if [[ $# -eq 0 ]]; then
+  python3 tests/generate_test_fixtures.py level "$INPUT"
+fi
+
+if [[ ! -f "$INPUT" ]]; then
+  echo "Missing input fixture: $INPUT"
   exit 1
 fi
 
@@ -79,15 +83,19 @@ echo "[4/5] Edit zlib NBT input"
 "$BIN" "$TMP_DIR/zlib_edit_out.dat" --dump "$TMP_DIR/zlib_edit_dump.txt" >"$TMP_DIR/zlib_edit_dump.log" 2>&1
 assert_grep "Int: 1357" "$TMP_DIR/zlib_edit_dump.txt"
 
-MCA_FILE="${MCA_FILE:-r.-9.3.mca}"
-if [[ -f "$MCA_FILE" ]]; then
-  echo "[5/5] Detect .mca chunk load"
-  "$BIN" "$MCA_FILE" --dump "$TMP_DIR/mca_dump.txt" >"$TMP_DIR/mca_dump.log" 2>&1
-  assert_grep "Detected source: mca_chunk" "$TMP_DIR/mca_dump.log"
-  assert_grep "Using region chunk \\(" "$TMP_DIR/mca_dump.log"
-  assert_grep "Tag: " "$TMP_DIR/mca_dump.txt"
-else
-  echo "[5/5] Skip .mca format check (missing $MCA_FILE)"
+if [[ -z "${MCA_FILE:-}" ]]; then
+  MCA_FILE="$TMP_DIR/r.0.0.mca"
+  python3 tests/generate_test_fixtures.py region "$MCA_FILE"
 fi
+if [[ ! -f "$MCA_FILE" ]]; then
+  echo "Missing region fixture: $MCA_FILE"
+  exit 1
+fi
+
+echo "[5/5] Detect .mca chunk load"
+"$BIN" "$MCA_FILE" --dump "$TMP_DIR/mca_dump.txt" >"$TMP_DIR/mca_dump.log" 2>&1
+assert_grep "Detected source: mca_chunk" "$TMP_DIR/mca_dump.log"
+assert_grep "Using region chunk \\(" "$TMP_DIR/mca_dump.log"
+assert_grep "Tag: " "$TMP_DIR/mca_dump.txt"
 
 echo "All format tests passed"

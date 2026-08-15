@@ -1,15 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BIN="${BIN:-./bin/nbt_explorer}"
-INPUT="${1:-level.dat}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BIN="${BIN:-$ROOT_DIR/bin/nbt_explorer}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nbt_verify_all_types.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
+INPUT="${1:-$TMP_DIR/level.dat}"
+MODIFIED_OUTPUT="$TMP_DIR/modified_output.dat"
+GENERATED_FIXTURE=0
 
 if [[ ! -x "$BIN" ]]; then
   echo "Missing binary: $BIN"
   echo "Run: make"
   exit 1
+fi
+
+if [[ $# -eq 0 ]]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "Missing dependency: python3"
+    exit 1
+  fi
+  python3 tests/generate_test_fixtures.py level "$INPUT"
+  GENERATED_FIXTURE=1
 fi
 
 if [[ ! -f "$INPUT" ]]; then
@@ -61,13 +75,13 @@ run_case() {
   echo "Original:"
   show_anchor_block "$ORIG_DUMP" "$anchor" "$lines"
 
-  if ! "$BIN" "$INPUT" --edit "$path" "$value" >"$TMP_DIR/${id}_edit.log" 2>&1; then
+  if ! "$BIN" "$INPUT" --edit "$path" "$value" --output "$MODIFIED_OUTPUT" >"$TMP_DIR/${id}_edit.log" 2>&1; then
     echo "Edit failed for $title"
     cat "$TMP_DIR/${id}_edit.log"
     exit 1
   fi
 
-  "$BIN" modified_output.dat --dump "$mod_dump" >/dev/null 2>&1
+  "$BIN" "$MODIFIED_OUTPUT" --dump "$mod_dump" >/dev/null 2>&1
 
   echo "Modified:"
   show_anchor_block "$mod_dump" "$anchor" "$lines"
@@ -97,14 +111,18 @@ fi
 echo
 if [[ -n "${BYTE_ARRAY_PATH:-}" && -n "${BYTE_ARRAY_VALUE:-}" && -n "${BYTE_ARRAY_ANCHOR:-}" ]]; then
   run_case "byte_array" "TAG_Byte_Array (optional)" "$BYTE_ARRAY_PATH" "$BYTE_ARRAY_VALUE" "$BYTE_ARRAY_ANCHOR" "${BYTE_ARRAY_LINES:-2}"
+elif [[ "$GENERATED_FIXTURE" -eq 1 ]]; then
+  run_case "byte_array" "TAG_Byte_Array" "Data/Player/TestBytes" "[1,2,3]" "Tag: TestBytes \\(Type 07\\)" 1
 else
-  echo "Skipped TAG_Byte_Array: set BYTE_ARRAY_PATH, BYTE_ARRAY_VALUE, BYTE_ARRAY_ANCHOR to test it."
+  echo "Skipped TAG_Byte_Array: set BYTE_ARRAY_PATH, BYTE_ARRAY_VALUE, and BYTE_ARRAY_ANCHOR to test it."
 fi
 
 if [[ -n "${LONG_ARRAY_PATH:-}" && -n "${LONG_ARRAY_VALUE:-}" && -n "${LONG_ARRAY_ANCHOR:-}" ]]; then
   run_case "long_array" "TAG_Long_Array (optional)" "$LONG_ARRAY_PATH" "$LONG_ARRAY_VALUE" "$LONG_ARRAY_ANCHOR" "${LONG_ARRAY_LINES:-2}"
+elif [[ "$GENERATED_FIXTURE" -eq 1 ]]; then
+  run_case "long_array" "TAG_Long_Array" "Data/Player/TestLongs" "[1,2,3]" "Tag: TestLongs \\(Type 0C\\)" 1
 else
-  echo "Skipped TAG_Long_Array: set LONG_ARRAY_PATH, LONG_ARRAY_VALUE, LONG_ARRAY_ANCHOR to test it."
+  echo "Skipped TAG_Long_Array: set LONG_ARRAY_PATH, LONG_ARRAY_VALUE, and LONG_ARRAY_ANCHOR to test it."
 fi
 
 echo
