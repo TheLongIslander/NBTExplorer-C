@@ -247,6 +247,12 @@ if(NBT_EXPLORER_BUILD_DESKTOP)
     endif()
 
     if(APPLE)
+        set(NBT_EXPLORER_PROJECT_LICENSE
+            "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+        target_sources(cnbt_explorer PRIVATE "${NBT_EXPLORER_PROJECT_LICENSE}")
+        set_source_files_properties("${NBT_EXPLORER_PROJECT_LICENSE}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION Resources)
+
         set(NBT_EXPLORER_MAC_ICON "${CMAKE_CURRENT_SOURCE_DIR}/packaging/cnbt-explorer.icns")
         target_sources(cnbt_explorer PRIVATE "${NBT_EXPLORER_MAC_ICON}")
         set_source_files_properties("${NBT_EXPLORER_MAC_ICON}" PROPERTIES
@@ -284,6 +290,11 @@ if(NBT_EXPLORER_BUILD_DESKTOP)
     )
     if(NBT_EXPLORER_BEDROCK_LEVELDB_ENABLED AND NOT APPLE)
         install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.txt"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/c-nbt-explorer"
+            COMPONENT desktop)
+    endif()
+    if(NOT APPLE)
+        install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
             DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/c-nbt-explorer"
             COMPONENT desktop)
     endif()
@@ -332,6 +343,12 @@ qt_deploy_runtime_dependencies(
         install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/packaging/io.github.cnbt-explorer.xml"
             DESTINATION "${CMAKE_INSTALL_DATADIR}/mime/packages" COMPONENT desktop)
     endif()
+endif()
+
+if(TARGET nbt_explorer)
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/c-nbt-explorer"
+        COMPONENT cli)
 endif()
 
 include(CTest)
@@ -400,6 +417,7 @@ set(CPACK_PACKAGE_VENDOR "C-NBT Explorer contributors")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Native cross-platform Minecraft NBT explorer and editor")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "C-NBT Explorer")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
 
 set(NBT_EXPLORER_PACKAGE_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
 if(WIN32 AND NBT_EXPLORER_PACKAGE_PROCESSOR MATCHES "^(AMD64|amd64|x86_64)$")
@@ -428,6 +446,7 @@ endif()
 if(APPLE)
     set(CPACK_GENERATOR "DragNDrop")
     set(CPACK_DMG_VOLUME_NAME "C-NBT Explorer")
+    set(CPACK_DMG_SLA_USE_RESOURCE_FILE_LICENSE ON)
 elseif(WIN32)
     if(NBT_EXPLORER_BUILD_DESKTOP)
         set(CPACK_GENERATOR "ZIP;NSIS")

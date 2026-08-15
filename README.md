@@ -187,3 +187,12 @@ See [BUILDING.md](BUILDING.md) for platform-specific builds and packaging,
 licenses. CI builds and tests the project on macOS, Windows, and Linux; the
 desktop packaging workflow produces a universal macOS DMG, Windows installer
 and portable ZIP, and Linux x86_64 AppImage.
+
+## License
+
+C-NBT Explorer is available under the [MIT License](LICENSE). Every generated
+package includes a copy: inside the macOS application bundle, under
+`usr/share/doc/c-nbt-explorer` in the Linux AppImage, and under
+`share/doc/c-nbt-explorer` in Windows and CLI-only CPack packages. Bundled
+third-party components remain under the licenses listed in
+[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).

@@ -145,6 +145,7 @@ jobs:
           verify_dir="$(mktemp -d)"
           (cd "$verify_dir" && "$appimage" --appimage-extract >/dev/null)
           test -x "$verify_dir/squashfs-root/AppRun"
+          cmp LICENSE "$verify_dir/squashfs-root/usr/share/doc/c-nbt-explorer/LICENSE"
 
           max_glibc="$({
             while IFS= read -r -d '' candidate; do
@@ -176,8 +177,24 @@ jobs:
           executable="build/C-NBT Explorer.app/Contents/MacOS/C-NBT Explorer"
           dmg="dist/C-NBT-Explorer-${VERSION}-Darwin-universal.dmg"
           lipo "$executable" -verify_arch arm64 x86_64
+          cmp LICENSE "build/C-NBT Explorer.app/Contents/Resources/LICENSE"
           test -s "$dmg"
           hdiutil verify "$dmg"
+
+          mount_dir="$(mktemp -d)"
+          mounted=false
+          cleanup_mount() {
+            if [[ "$mounted" == true ]]; then
+              hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup_mount EXIT
+          printf 'Y\n' | hdiutil attach "$dmg" \
+            -readonly -nobrowse -mountpoint "$mount_dir" >/dev/null
+          mounted=true
+          cmp LICENSE "$mount_dir/C-NBT Explorer.app/Contents/Resources/LICENSE"
+          hdiutil detach "$mount_dir" >/dev/null
+          mounted=false
 
       - name: Verify Windows packages
         if: runner.os == 'Windows'
@@ -198,6 +215,31 @@ jobs:
           if (!($entries -match 'bin/cnbt-explorer\.exe$')) {
             throw 'Portable ZIP does not contain bin/cnbt-explorer.exe'
           }
+          if (!($entries -match 'share/doc/c-nbt-explorer/LICENSE$')) {
+            throw 'Portable ZIP does not contain the project MIT license'
+          }
+
+          $sourceLicenseHash = (Get-FileHash LICENSE -Algorithm SHA256).Hash
+          $zipPath = (Resolve-Path $zip).Path
+          $zipExtractDir = Join-Path $env:RUNNER_TEMP "cnbt-zip-$([guid]::NewGuid().ToString('N'))"
+          New-Item -ItemType Directory -Path $zipExtractDir | Out-Null
+          Push-Location $zipExtractDir
+          try {
+            & cmake -E tar xf $zipPath
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not extract portable ZIP: $zipPath"
+            }
+          } finally {
+            Pop-Location
+          }
+          $zipLicense = Join-Path $zipExtractDir "C-NBT-Explorer-$env:VERSION-Windows-x86_64/share/doc/c-nbt-explorer/LICENSE"
+          if (!(Test-Path $zipLicense)) {
+            throw "Extracted portable ZIP license is missing: $zipLicense"
+          }
+          if ((Get-FileHash $zipLicense -Algorithm SHA256).Hash -ne $sourceLicenseHash) {
+            throw 'Portable ZIP license differs from the project MIT license'
+          }
+
           $requiredRuntimeDlls = @(
             'msvcp140.dll',
             'msvcp140_1.dll',
@@ -208,6 +250,30 @@ jobs:
           foreach ($runtimeDll in $requiredRuntimeDlls) {
             if (!($entries -match "bin/$([regex]::Escape($runtimeDll))$")) {
               throw "Portable ZIP does not contain required MSVC runtime $runtimeDll"
+            }
+          }
+
+          $installerPath = (Resolve-Path $installer).Path
+          $installDir = Join-Path $env:RUNNER_TEMP "cnbt-install-$([guid]::NewGuid().ToString('N'))"
+          try {
+            $installProcess = Start-Process -FilePath $installerPath -ArgumentList '/S', "/D=$installDir" -Wait -PassThru
+            if ($installProcess.ExitCode -ne 0) {
+              throw "NSIS installer exited with code $($installProcess.ExitCode)"
+            }
+            $installedLicense = Join-Path $installDir 'share/doc/c-nbt-explorer/LICENSE'
+            if (!(Test-Path $installedLicense)) {
+              throw "Installed MIT license is missing: $installedLicense"
+            }
+            if ((Get-FileHash $installedLicense -Algorithm SHA256).Hash -ne $sourceLicenseHash) {
+              throw 'NSIS-installed license differs from the project MIT license'
+            }
+          } finally {
+            $uninstaller = Join-Path $installDir 'Uninstall.exe'
+            if (Test-Path $uninstaller) {
+              $uninstallProcess = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+              if ($uninstallProcess.ExitCode -ne 0) {
+                throw "NSIS uninstaller exited with code $($uninstallProcess.ExitCode)"
+              }
             }
           }
 
