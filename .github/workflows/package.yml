@@ -56,7 +56,9 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-latest
+          # Build on Ubuntu 22.04 so the AppImage does not inherit a glibc
+          # baseline newer than distributions we advertise as supported.
+          - ubuntu-22.04
           - macos-latest
           # Windows Server 2022 includes NSIS; the 2025 image removed it.
           - windows-2022
@@ -137,11 +139,32 @@ jobs:
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
+          export LC_ALL=C
           appimage="$PWD/dist/C-NBT-Explorer-${VERSION}-Linux-x86_64.AppImage"
           test -s "$appimage"
           verify_dir="$(mktemp -d)"
           (cd "$verify_dir" && "$appimage" --appimage-extract >/dev/null)
           test -x "$verify_dir/squashfs-root/AppRun"
+
+          max_glibc="$({
+            while IFS= read -r -d '' candidate; do
+              if file "$candidate" | grep -q 'ELF'; then
+                {
+                  objdump -T "$candidate" 2>/dev/null |
+                    sed -nE 's/.*\(GLIBC_([0-9]+(\.[0-9]+)+)\).*/\1/p'
+                } || true
+              fi
+            done < <(find "$verify_dir/squashfs-root" -type f -print0)
+          } | sort -V | tail -n 1)"
+          if [[ -z "$max_glibc" ]]; then
+            echo "Could not determine the AppImage glibc requirement" >&2
+            exit 1
+          fi
+          if [[ "$(printf '%s\n' "$max_glibc" '2.35' | sort -V | tail -n 1)" != '2.35' ]]; then
+            echo "AppImage requires glibc $max_glibc; maximum supported baseline is 2.35" >&2
+            exit 1
+          fi
+          echo "Maximum AppImage glibc requirement: $max_glibc"
 
       - name: Verify universal macOS DMG
         if: runner.os == 'macOS'

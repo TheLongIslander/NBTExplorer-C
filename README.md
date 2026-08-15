@@ -44,8 +44,9 @@ chmod +x C-NBT-Explorer-*.AppImage
 ./C-NBT-Explorer-*.AppImage
 ```
 
-The AppImage is portable and does not require installation. If the system does
-not provide FUSE, AppImage's extraction fallback can be used:
+The release AppImage targets x86_64 Linux with glibc 2.35 or newer (for
+example, Ubuntu 22.04 or newer) and does not require installation. If the
+system does not provide FUSE, AppImage's extraction fallback can be used:
 
 ```sh
 ./C-NBT-Explorer-*.AppImage --appimage-extract-and-run

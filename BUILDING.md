@@ -96,10 +96,11 @@ cpack --config build/CPackConfig.cmake -G NSIS -C Release -B dist
 
 Tagged builds and manually dispatched runs use the native desktop packaging
 workflow to build a DMG, a Windows portable ZIP and installer, and an x86_64
-AppImage. Manual runs retain the packages as GitHub Actions artifacts for
-testing. A pushed `vX.Y.Z` tag must match the version declared by the CMake
-`project()` command; after every platform succeeds, the workflow attaches the
-packages and `SHA256SUMS` to a draft GitHub Release.
+AppImage. The AppImage is built on Ubuntu 22.04 and checked for a glibc 2.35
+maximum requirement. Manual runs retain the packages as GitHub Actions
+artifacts for testing. A pushed `vX.Y.Z` tag must match the version declared by
+the CMake `project()` command; after every platform succeeds, the workflow
+attaches the packages and `SHA256SUMS` to a draft GitHub Release.
 
 For a release, first update the version in the top-level CMake `project()`
 command and merge that change to `main`. CMake and Make both inject that value
