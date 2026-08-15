@@ -58,7 +58,8 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-          - windows-latest
+          # Windows Server 2022 includes NSIS; the 2025 image removed it.
+          - windows-2022
 
     steps:
       - name: Check out source
@@ -121,10 +122,6 @@ jobs:
         if: runner.os == 'macOS'
         run: cpack --config build/CPackConfig.cmake -G DragNDrop -C Release -B dist
 
-      - name: Install NSIS
-        if: runner.os == 'Windows'
-        run: choco install nsis --no-progress --yes
-
       - name: Build Windows portable ZIP
         if: runner.os == 'Windows'
         run: cpack --config build/CPackConfig.cmake -G ZIP -C Release -B dist
@@ -155,7 +152,7 @@ jobs:
           set -euo pipefail
           executable="build/C-NBT Explorer.app/Contents/MacOS/C-NBT Explorer"
           dmg="dist/C-NBT-Explorer-${VERSION}-Darwin-universal.dmg"
-          lipo -verify_arch arm64 x86_64 "$executable"
+          lipo "$executable" -verify_arch arm64 x86_64
           test -s "$dmg"
           hdiutil verify "$dmg"
 
