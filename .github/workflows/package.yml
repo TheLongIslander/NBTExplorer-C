@@ -176,12 +176,34 @@ jobs:
             throw 'Portable ZIP does not contain bin/cnbt-explorer.exe'
           }
 
-      - name: Upload package
+      - name: Upload Linux package
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: C-NBT-Explorer-${{ runner.os }}
-          path: dist/*
+          name: C-NBT-Explorer-Linux
+          path: dist/C-NBT-Explorer-${{ needs.metadata.outputs.version }}-Linux-x86_64.AppImage
           if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload macOS package
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: C-NBT-Explorer-macOS
+          path: dist/C-NBT-Explorer-${{ needs.metadata.outputs.version }}-Darwin-universal.dmg
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Windows packages
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: C-NBT-Explorer-Windows
+          path: |
+            dist/C-NBT-Explorer-${{ needs.metadata.outputs.version }}-Windows-x86_64.exe
+            dist/C-NBT-Explorer-${{ needs.metadata.outputs.version }}-Windows-x86_64.zip
+          if-no-files-found: error
+          compression-level: 0
 
   release:
     name: Create draft GitHub Release
