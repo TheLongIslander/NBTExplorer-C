@@ -175,6 +175,18 @@ jobs:
           if (!($entries -match 'bin/cnbt-explorer\.exe$')) {
             throw 'Portable ZIP does not contain bin/cnbt-explorer.exe'
           }
+          $requiredRuntimeDlls = @(
+            'msvcp140.dll',
+            'msvcp140_1.dll',
+            'msvcp140_2.dll',
+            'vcruntime140.dll',
+            'vcruntime140_1.dll'
+          )
+          foreach ($runtimeDll in $requiredRuntimeDlls) {
+            if (!($entries -match "bin/$([regex]::Escape($runtimeDll))$")) {
+              throw "Portable ZIP does not contain required MSVC runtime $runtimeDll"
+            }
+          }
 
       - name: Upload Linux package
         if: runner.os == 'Linux'

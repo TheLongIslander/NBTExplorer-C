@@ -168,6 +168,17 @@ if(TARGET nbt_explorer)
 endif()
 
 include(GNUInstallDirs)
+
+# App-local MSVC runtimes keep both the portable ZIP and NSIS package usable
+# on clean Windows systems that do not already have the Visual C++
+# Redistributable installed. InstallRequiredSystemLibraries selects the
+# redistributable DLLs for the compiler/toolset used to build this package.
+if(MSVC AND NBT_EXPLORER_BUILD_DESKTOP)
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_COMPONENT desktop)
+    include(InstallRequiredSystemLibraries)
+endif()
+
 if(TARGET nbt_explorer)
     install(TARGETS nbt_explorer
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
