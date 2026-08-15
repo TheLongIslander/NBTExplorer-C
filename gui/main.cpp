@@ -7,6 +7,10 @@
 
 #include "MainWindow.h"
 
+#ifndef CNBT_VERSION
+#define CNBT_VERSION "development"
+#endif
+
 class CnbtApplication final : public QApplication {
 public:
     using QApplication::QApplication;
@@ -42,7 +46,7 @@ int main(int argc, char* argv[]) {
     QCoreApplication::setOrganizationName(QStringLiteral("C-NBT Explorer"));
     QCoreApplication::setOrganizationDomain(QStringLiteral("io.github.cnbt-explorer"));
     QCoreApplication::setApplicationName(QStringLiteral("C-NBT Explorer"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.2.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(CNBT_VERSION));
     application.setWindowIcon(QIcon(QStringLiteral(":/icons/cnbt-explorer.svg")));
 
     MainWindow window;

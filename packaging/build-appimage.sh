@@ -12,6 +12,12 @@ if [[ ! -f "${build_dir}/CMakeCache.txt" ]]; then
   exit 1
 fi
 
+package_version="$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' "${build_dir}/CMakeCache.txt" | head -n 1)"
+if [[ ! "${package_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "Could not read a valid project version from ${build_dir}/CMakeCache.txt" >&2
+  exit 1
+fi
+
 cmake -E remove_directory "${app_dir}"
 cmake -E make_directory "${app_dir}/usr" "${tool_dir}" "${output_dir}"
 cmake --install "${build_dir}" --prefix "${app_dir}/usr" --config Release --component desktop
@@ -53,7 +59,7 @@ download_tool \
 
 export PATH="${tool_dir}:${PATH}"
 export APPIMAGE_EXTRACT_AND_RUN=1
-export OUTPUT="${output_dir}/C-NBT-Explorer-x86_64.AppImage"
+export OUTPUT="${output_dir}/C-NBT-Explorer-${package_version}-Linux-x86_64.AppImage"
 
 "${linuxdeploy}" \
   --appdir "${app_dir}" \

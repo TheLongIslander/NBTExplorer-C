@@ -1,5 +1,10 @@
 CC ?= cc
 CPPFLAGS ?= -Ih
+PROJECT_VERSION := $(shell sed -nE 's/^project\(c_nbt_explorer VERSION ([0-9]+\.[0-9]+\.[0-9]+) LANGUAGES C\)$$/\1/p' CMakeLists.txt)
+ifeq ($(strip $(PROJECT_VERSION)),)
+$(error Could not read the project version from CMakeLists.txt)
+endif
+CPPFLAGS += -DCNBT_VERSION=\"$(PROJECT_VERSION)\"
 CFLAGS ?= -O2 -g
 CFLAGS += -Wall -Wextra -Wpedantic
 LDFLAGS ?=

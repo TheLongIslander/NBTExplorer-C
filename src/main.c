@@ -17,7 +17,9 @@
 #include "region_write.h"
 #include "snbt.h"
 
-#define CNBT_VERSION "0.2.0"
+#ifndef CNBT_VERSION
+#define CNBT_VERSION "development"
+#endif
 
 typedef enum {
     MODE_PRINT = 0,

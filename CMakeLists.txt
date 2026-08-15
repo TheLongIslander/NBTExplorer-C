@@ -129,6 +129,7 @@ set_target_properties(nbt_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(NBT_EXPLORER_BUILD_CLI)
     add_executable(nbt_explorer "${CMAKE_CURRENT_SOURCE_DIR}/src/main.c")
+    target_compile_definitions(nbt_explorer PRIVATE CNBT_VERSION="${PROJECT_VERSION}")
     target_link_libraries(nbt_explorer PRIVATE nbt_core)
 endif()
 
@@ -224,6 +225,7 @@ if(NBT_EXPLORER_BUILD_DESKTOP)
         "${CMAKE_CURRENT_SOURCE_DIR}/h"
     )
     target_link_libraries(cnbt_explorer PRIVATE nbt_core Qt6::Widgets)
+    target_compile_definitions(cnbt_explorer PRIVATE CNBT_VERSION="${PROJECT_VERSION}")
 
     if(APPLE AND NBT_EXPLORER_BEDROCK_LEVELDB_ENABLED)
         set(NBT_EXPLORER_THIRD_PARTY_NOTICES
@@ -350,6 +352,9 @@ if(BUILD_TESTING)
     add_test(NAME region_lz4 COMMAND region_lz4_test)
 
     if(TARGET nbt_explorer)
+        add_test(NAME cli_version COMMAND "$<TARGET_FILE:nbt_explorer>" --version)
+        set_tests_properties(cli_version PROPERTIES
+            PASS_REGULAR_EXPRESSION "C-NBT Explorer ${PROJECT_VERSION}")
         add_test(
             NAME cli_usage
             COMMAND "${CMAKE_COMMAND}"
@@ -386,6 +391,9 @@ set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "C-NBT Explorer")
 
 set(NBT_EXPLORER_PACKAGE_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
+if(WIN32 AND NBT_EXPLORER_PACKAGE_PROCESSOR MATCHES "^(AMD64|amd64|x86_64)$")
+    set(NBT_EXPLORER_PACKAGE_PROCESSOR "x86_64")
+endif()
 if(APPLE AND CMAKE_OSX_ARCHITECTURES)
     set(NBT_EXPLORER_MAC_ARCHITECTURES ${CMAKE_OSX_ARCHITECTURES})
     list(FIND NBT_EXPLORER_MAC_ARCHITECTURES arm64 NBT_EXPLORER_HAS_ARM64)

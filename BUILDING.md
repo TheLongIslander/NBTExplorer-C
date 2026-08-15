@@ -95,8 +95,26 @@ cpack --config build/CPackConfig.cmake -G NSIS -C Release -B dist
 ```
 
 Tagged builds and manually dispatched runs use the native desktop packaging
-workflow to publish a DMG, a Windows portable ZIP and installer, and an
-x86_64 AppImage as GitHub Actions artifacts.
+workflow to build a DMG, a Windows portable ZIP and installer, and an x86_64
+AppImage. Manual runs retain the packages as GitHub Actions artifacts for
+testing. A pushed `vX.Y.Z` tag must match the version declared by the CMake
+`project()` command; after every platform succeeds, the workflow attaches the
+packages and `SHA256SUMS` to a draft GitHub Release.
+
+For a release, first update the version in the top-level CMake `project()`
+command and merge that change to `main`. CMake and Make both inject that value
+into the CLI and desktop application at build time. Run the packaging workflow
+manually and test its artifacts. Then create and push only the intended
+annotated tag:
+
+```sh
+git tag -a v0.2.0 -m "C-NBT Explorer 0.2.0"
+git push origin v0.2.0
+```
+
+Review and test the draft release assets before publishing the release from
+GitHub. Do not create the release in the GitHub UI before pushing the tag; the
+workflow owns draft creation and asset upload.
 
 The automated packages are unsigned. Public distribution without operating
 system trust warnings requires an Apple Developer ID plus notarization for the
