@@ -10,6 +10,7 @@
 #include "edit_value.h"
 #include "jsmn.h"
 #include "nbt_builder.h"
+#include "platform.h"
 
 typedef struct {
     const char* text;
@@ -432,14 +433,14 @@ static NBTTag* create_named_tag(TagType type, const char* name) {
 
     memset(tag, 0, sizeof(NBTTag));
     tag->type = type;
-    tag->name = strdup(name ? name : "");
+    tag->name = nbt_strdup(name ? name : "");
     if (!tag->name) {
         free(tag);
         return NULL;
     }
 
     if (type == TAG_String) {
-        tag->value.string_val = strdup("");
+        tag->value.string_val = nbt_strdup("");
         if (!tag->value.string_val) {
             free(tag->name);
             free(tag);

@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/icons">
+    <file alias="cnbt-explorer.svg">../packaging/io.github.cnbt-explorer.svg</file>
+  </qresource>
+</RCC>

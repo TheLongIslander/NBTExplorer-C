@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "edit_path.h"
+#include "platform.h"
 
 typedef enum {
     INDEX_NONE = 0,
@@ -743,7 +744,7 @@ EditStatus resolve_set_parent_and_key(NBTTag* root, const char* path, NBTTag** o
     }
 
     *out_parent = current;
-    *out_key = strdup(segs[seg_count - 1].key ? segs[seg_count - 1].key : "");
+    *out_key = nbt_strdup(segs[seg_count - 1].key ? segs[seg_count - 1].key : "");
     if (!*out_key) {
         free_parsed_segments(segs, seg_count);
         set_err(err, err_sz, "out of memory");

@@ -5,7 +5,7 @@
 #include "nbt_parser.h"
 #include "region_file.h"
 
-/* compression_override: -1 preserve existing (or default zlib), otherwise 1/2/3 */
+/* compression_override: -1 preserve existing (or default zlib), otherwise 1/2/3/4 */
 int region_file_update_chunk_from_nbt(
     RegionFile* region,
     int chunk_x,

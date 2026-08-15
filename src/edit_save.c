@@ -7,6 +7,7 @@
 #include "edit_save.h"
 #include "edit_value.h"
 #include "nbt_builder.h"
+#include "nbt_tree.h"
 
 static void write_payload(gzFile f, NBTTag* tag);
 
@@ -930,6 +931,60 @@ EditStatus delete_tag_by_path(NBTTag* root, const char* path, char* err, size_t 
         }
     }
 
+    free_edit_paths(targets);
+    return EDIT_OK;
+}
+
+EditStatus rename_tag_by_path(
+    NBTTag* root,
+    const char* path,
+    const char* new_name,
+    char* err,
+    size_t err_sz
+) {
+    PathTarget* targets = NULL;
+    size_t count = 0;
+    EditStatus status;
+    PathTarget* target;
+    int existing_index;
+
+    if (!root || !path || !new_name) {
+        set_err(err, err_sz, "invalid rename arguments");
+        return EDIT_ERR_PATH_SYNTAX;
+    }
+    if (strlen(new_name) > 0xFFFFu) {
+        set_err(err, err_sz, "tag name is longer than the NBT 16-bit string limit");
+        return EDIT_ERR_NUMERIC_RANGE;
+    }
+
+    status = resolve_edit_paths(root, path, &targets, &count, err, err_sz);
+    if (status != EDIT_OK) return status;
+    if (count != 1) {
+        free_edit_paths(targets);
+        set_err(err, err_sz, "unsupported operation: rename requires exactly one tag");
+        return EDIT_ERR_UNSUPPORTED;
+    }
+
+    target = &targets[0];
+    if (target->kind != PATH_TARGET_TAG || target->tag == root || !target->parent ||
+        target->parent->type != TAG_Compound) {
+        free_edit_paths(targets);
+        set_err(err, err_sz, "unsupported operation: only named compound children can be renamed");
+        return EDIT_ERR_UNSUPPORTED;
+    }
+
+    existing_index = nbt_compound_find_index(target->parent, new_name);
+    if (existing_index >= 0 && target->parent->value.compound.items[existing_index] != target->tag) {
+        free_edit_paths(targets);
+        set_err(err, err_sz, "a sibling tag already has that name");
+        return EDIT_ERR_TYPE_MISMATCH;
+    }
+
+    if (!nbt_tag_rename(target->tag, new_name)) {
+        free_edit_paths(targets);
+        set_err(err, err_sz, "out of memory");
+        return EDIT_ERR_MEMORY;
+    }
     free_edit_paths(targets);
     return EDIT_OK;
 }

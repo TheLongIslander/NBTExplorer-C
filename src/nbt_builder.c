@@ -4,6 +4,7 @@
 #include <string.h>
 #include "nbt_builder.h"
 #include "nbt_utils.h"
+#include "platform.h"
 
 static void set_err(char* err, size_t err_sz, const char* msg) {
     if (err && err_sz > 0) {
@@ -12,7 +13,7 @@ static void set_err(char* err, size_t err_sz, const char* msg) {
 }
 
 static int is_valid_tag_type(uint8_t tag_type) {
-    return tag_type >= TAG_End && tag_type <= TAG_Long_Array;
+    return tag_type <= TAG_Long_Array;
 }
 
 static NBTTag* create_empty_tag(TagType type, const char* name) {
@@ -21,14 +22,14 @@ static NBTTag* create_empty_tag(TagType type, const char* name) {
 
     memset(tag, 0, sizeof(NBTTag));
     tag->type = type;
-    tag->name = strdup(name ? name : "");
+    tag->name = nbt_strdup(name ? name : "");
     if (!tag->name) {
         free(tag);
         return NULL;
     }
 
     if (type == TAG_String) {
-        tag->value.string_val = strdup("");
+        tag->value.string_val = nbt_strdup("");
         if (!tag->value.string_val) {
             free(tag->name);
             free(tag);

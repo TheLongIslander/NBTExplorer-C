@@ -5,3 +5,16 @@ modified_output.dat
 original.txt
 level copy.dat
 r.-9.3.mca
+build/
+build-*/
+.vs/
+CMakeSettings.json
+CMakeUserPresets.json
+dist/
+dist-*/
+AppDir/
+/bin/
+/aqtinstall.log
+/region_file.plist
+/region_read.plist
+/region_write.plist

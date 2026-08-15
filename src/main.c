@@ -1,574 +1,379 @@
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <errno.h>
-#include <limits.h>
-#include "io.h"
-#include "nbt_builder.h"
-#include "nbt_utils.h"
+
+#include "cli_support.h"
 #include "edit_save.h"
+#include "nbt_binary.h"
+#include "nbt_builder.h"
+#include "nbt_io.h"
+#include "nbt_json.h"
+#include "nbt_parser.h"
+#include "region_file.h"
 #include "region_read.h"
 #include "region_write.h"
-#include <zlib.h>
-#include <unistd.h>
+#include "snbt.h"
+
+#define CNBT_VERSION "0.2.0"
 
 typedef enum {
-    MODE_DEFAULT = 0,
+    MODE_PRINT = 0,
     MODE_EDIT,
     MODE_SET,
     MODE_DELETE,
-    MODE_DUMP
+    MODE_RENAME,
+    MODE_DUMP,
+    MODE_JSON,
+    MODE_SNBT,
+    MODE_LIST_CHUNKS,
+    MODE_VALIDATE
 } CliMode;
 
-static void print_usage(const char* prog) {
+typedef enum {
+    INPUT_AUTO = 0,
+    INPUT_JAVA,
+    INPUT_BEDROCK,
+    INPUT_BEDROCK_LEVEL,
+    INPUT_SNBT
+} CliInputMode;
+
+static void print_usage(const char* program) {
+    printf("C-NBT Explorer %s\n\n", CNBT_VERSION);
     printf("Usage:\n");
-    printf("  %s <file.dat|file.mca> [--chunk x z] [--edit path newValue] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
-    printf("  %s <file.dat|file.mca> [--chunk x z] [--set path newValue] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
-    printf("  %s <file.dat|file.mca> [--chunk x z] [--delete path] [--output out.dat | --in-place [--backup[=suffix]]]\n", prog);
-    printf("  %s <file.dat|file.mca> [--chunk x z] [--dump output.txt]\n", prog);
-    printf("  --chunk x z selects a local chunk from .mca (0..31 each). If omitted, first populated chunk is used.\n");
-    printf("  For .mca edits, --output out.mca rewrites the full region safely; --in-place requires --chunk.\n");
+    printf("  %s <file> [--chunk x z] [--format auto|java|bedrock|bedrock-level|snbt]\n", program);
+    printf("  %s <file> [--chunk x z] --dump output.txt\n", program);
+    printf("  %s <file> [--chunk x z] --json output.json\n", program);
+    printf("  %s <file> [--chunk x z] --snbt output.snbt\n", program);
+    printf("  %s <region.mca|region.mcr> --list-chunks\n", program);
+    printf("  %s <file> --validate\n", program);
+    printf("  %s <file> [--chunk x z] --edit path jsonValue [save options]\n", program);
+    printf("  %s <file> [--chunk x z] --set path jsonValue [save options]\n", program);
+    printf("  %s <file> [--chunk x z] --delete path [save options]\n", program);
+    printf("  %s <file> [--chunk x z] --rename path newName [save options]\n", program);
+    printf("\nSave options:\n");
+    printf("  --output path       Write a new file.\n");
+    printf("  --in-place         Atomically replace the input.\n");
+    printf("  --backup[=suffix]  Back up an in-place edit (default: .bak).\n");
+    printf("\nRegion coordinates are local (0..31). Input encoding and compression are preserved.\n");
 }
 
-static void set_err(char* err, size_t err_sz, const char* msg) {
-    if (err && err_sz > 0) {
-        snprintf(err, err_sz, "%s", msg);
-    }
-}
-
-static int copy_file(const char* src, const char* dst, char* err, size_t err_sz) {
-    FILE* in = NULL;
-    FILE* out = NULL;
-    unsigned char buf[8192];
-    size_t n;
-    int ok = 0;
-
-    in = fopen(src, "rb");
-    if (!in) {
-        if (err && err_sz > 0) {
-            snprintf(err, err_sz, "fopen(%s): %s", src, strerror(errno));
-        }
-        return 0;
-    }
-
-    out = fopen(dst, "wb");
-    if (!out) {
-        if (err && err_sz > 0) {
-            snprintf(err, err_sz, "fopen(%s): %s", dst, strerror(errno));
-        }
-        fclose(in);
-        return 0;
-    }
-
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, n, out) != n) {
-            set_err(err, err_sz, "failed to write backup file");
-            goto done;
-        }
-    }
-
-    if (ferror(in)) {
-        set_err(err, err_sz, "failed to read input file while creating backup");
-        goto done;
-    }
-
-    ok = 1;
-
-done:
-    fclose(in);
-    if (fclose(out) != 0) {
-        ok = 0;
-    }
-    if (!ok) {
-        remove(dst);
-    }
-    return ok;
-}
-
-static char* make_backup_path(const char* input_path, const char* suffix) {
-    size_t in_len = strlen(input_path);
-    size_t suf_len = strlen(suffix);
-    char* out = malloc(in_len + suf_len + 1);
-    if (!out) return NULL;
-    memcpy(out, input_path, in_len);
-    memcpy(out + in_len, suffix, suf_len);
-    out[in_len + suf_len] = '\0';
-    return out;
-}
-
-static char* make_temp_template(const char* target_path) {
-    const char* slash = strrchr(target_path, '/');
-    const char* base = ".nbt_explorer_tmp_XXXXXX";
-    size_t base_len = strlen(base);
-    char* tmpl;
-
-    if (!slash) {
-        tmpl = malloc(base_len + 1);
-        if (!tmpl) return NULL;
-        memcpy(tmpl, base, base_len + 1);
-        return tmpl;
-    }
-
-    size_t dir_len = (size_t)(slash - target_path + 1);
-    tmpl = malloc(dir_len + base_len + 1);
-    if (!tmpl) return NULL;
-
-    memcpy(tmpl, target_path, dir_len);
-    memcpy(tmpl + dir_len, base, base_len);
-    tmpl[dir_len + base_len] = '\0';
-    return tmpl;
-}
-
-static int write_nbt_atomically(const char* target_path, NBTTag* root, char* err, size_t err_sz) {
-    char* tmp_template = make_temp_template(target_path);
-    int fd;
-    gzFile out;
-    int zret;
-
-    if (!tmp_template) {
-        set_err(err, err_sz, "out of memory");
-        return 0;
-    }
-
-    fd = mkstemp(tmp_template);
-    if (fd < 0) {
-        if (err && err_sz > 0) {
-            snprintf(err, err_sz, "mkstemp(%s): %s", tmp_template, strerror(errno));
-        }
-        free(tmp_template);
-        return 0;
-    }
-
-    out = gzdopen(fd, "wb");
-    if (!out) {
-        if (err && err_sz > 0) {
-            snprintf(err, err_sz, "gzdopen: %s", strerror(errno));
-        }
-        close(fd);
-        unlink(tmp_template);
-        free(tmp_template);
-        return 0;
-    }
-
-    write_tag(out, root);
-    zret = gzclose(out);
-    if (zret != Z_OK) {
-        set_err(err, err_sz, "failed to finish compressed output write");
-        unlink(tmp_template);
-        free(tmp_template);
-        return 0;
-    }
-
-    if (rename(tmp_template, target_path) != 0) {
-        if (err && err_sz > 0) {
-            snprintf(err, err_sz, "rename(%s -> %s): %s", tmp_template, target_path, strerror(errno));
-        }
-        unlink(tmp_template);
-        free(tmp_template);
-        return 0;
-    }
-
-    free(tmp_template);
-    return 1;
-}
-
-static int parse_int_arg(const char* text, int* out_value) {
+static int parse_int_arg(const char* text, int* output) {
     char* end = NULL;
     long value;
-
-    if (!text || !out_value) return 0;
-
+    if (!text || !output) return 0;
     errno = 0;
     value = strtol(text, &end, 10);
-    if (errno != 0 || end == text || *end != '\0') {
-        return 0;
-    }
-    if (value < INT_MIN || value > INT_MAX) {
-        return 0;
-    }
-    *out_value = (int)value;
+    if (errno || end == text || *end || value < INT_MIN || value > INT_MAX) return 0;
+    *output = (int)value;
     return 1;
 }
 
-static int has_mca_extension(const char* filename) {
+static int has_extension(const char* path, const char* extension) {
     const char* dot;
+    size_t index;
+    if (!path || !extension || !(dot = strrchr(path, '.'))) return 0;
+    for (index = 0; dot[index] && extension[index]; index++) {
+        char a = dot[index];
+        char b = extension[index];
+        if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z') b = (char)(b + ('a' - 'A'));
+        if (a != b) return 0;
+    }
+    return !dot[index] && !extension[index];
+}
 
-    if (!filename) return 0;
-    dot = strrchr(filename, '.');
-    if (!dot) return 0;
-    return (dot[1] == 'm' || dot[1] == 'M') &&
-           (dot[2] == 'c' || dot[2] == 'C') &&
-           (dot[3] == 'a' || dot[3] == 'A') &&
-           dot[4] == '\0';
+static int parse_input_mode(const char* text, CliInputMode* mode) {
+    if (!strcmp(text, "auto")) *mode = INPUT_AUTO;
+    else if (!strcmp(text, "java")) *mode = INPUT_JAVA;
+    else if (!strcmp(text, "bedrock")) *mode = INPUT_BEDROCK;
+    else if (!strcmp(text, "bedrock-level")) *mode = INPUT_BEDROCK_LEVEL;
+    else if (!strcmp(text, "snbt")) *mode = INPUT_SNBT;
+    else return 0;
+    return 1;
+}
+
+static int is_mutation(CliMode mode) {
+    return mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE || mode == MODE_RENAME;
 }
 
 int main(int argc, char* argv[]) {
-    CliMode mode = MODE_DEFAULT;
+    CliMode mode = MODE_PRINT;
+    CliInputMode input_mode = INPUT_AUTO;
     const char* input_path;
-    const char* op_path = NULL;
-    const char* op_value = NULL;
-    const char* dump_path = NULL;
+    const char* operation_path = NULL;
+    const char* operation_value = NULL;
+    const char* result_path = NULL;
     const char* output_path = NULL;
     const char* backup_suffix = ".bak";
+    int operation_seen = 0;
     int in_place = 0;
     int backup_enabled = 0;
-    NBTLoadOptions load_opts = {0};
+    NBTLoadOptions load_options = {0};
+    NBTLoadInfo load_info = {0};
+    NBTBinaryInfo binary_info = {0};
+    unsigned char* data = NULL;
+    size_t data_size = 0;
+    NBTTag* root = NULL;
+    char error[512] = {0};
+    clock_t started;
+    double elapsed_ms = 0.0;
+    int source_is_snbt;
+    int exit_code = 1;
+    int index;
 
+    if (argc == 2 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) {
+        print_usage(argv[0]);
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--version")) {
+        printf("C-NBT Explorer %s\n", CNBT_VERSION);
+        return 0;
+    }
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;
     }
-
     input_path = argv[1];
 
-    for (int i = 2; i < argc; i++) {
-        const char* arg = argv[i];
+#define CHOOSE_MODE(value) \
+    do { \
+        if (operation_seen) { print_usage(argv[0]); return 1; } \
+        operation_seen = 1; \
+        mode = (value); \
+    } while (0)
 
-        if (strcmp(arg, "--edit") == 0) {
-            if (mode != MODE_DEFAULT || i + 2 >= argc) {
-                print_usage(argv[0]);
-                return 1;
-            }
-            mode = MODE_EDIT;
-            op_path = argv[++i];
-            op_value = argv[++i];
-            continue;
-        }
-
-        if (strcmp(arg, "--set") == 0) {
-            if (mode != MODE_DEFAULT || i + 2 >= argc) {
-                print_usage(argv[0]);
-                return 1;
-            }
-            mode = MODE_SET;
-            op_path = argv[++i];
-            op_value = argv[++i];
-            continue;
-        }
-
-        if (strcmp(arg, "--delete") == 0) {
-            if (mode != MODE_DEFAULT || i + 1 >= argc) {
-                print_usage(argv[0]);
-                return 1;
-            }
-            mode = MODE_DELETE;
-            op_path = argv[++i];
-            continue;
-        }
-
-        if (strcmp(arg, "--dump") == 0) {
-            if (mode != MODE_DEFAULT || i + 1 >= argc) {
-                print_usage(argv[0]);
-                return 1;
-            }
-            mode = MODE_DUMP;
-            dump_path = argv[++i];
-            continue;
-        }
-
-        if (strcmp(arg, "--output") == 0) {
-            if (i + 1 >= argc) {
-                print_usage(argv[0]);
-                return 1;
-            }
-            output_path = argv[++i];
-            continue;
-        }
-
-        if (strcmp(arg, "--in-place") == 0) {
+    for (index = 2; index < argc; index++) {
+        const char* argument = argv[index];
+        if (!strcmp(argument, "--edit") || !strcmp(argument, "--set") || !strcmp(argument, "--rename")) {
+            if (index + 2 >= argc) { print_usage(argv[0]); return 1; }
+            CHOOSE_MODE(!strcmp(argument, "--edit") ? MODE_EDIT :
+                        !strcmp(argument, "--set") ? MODE_SET : MODE_RENAME);
+            operation_path = argv[++index];
+            operation_value = argv[++index];
+        } else if (!strcmp(argument, "--delete")) {
+            if (index + 1 >= argc) { print_usage(argv[0]); return 1; }
+            CHOOSE_MODE(MODE_DELETE);
+            operation_path = argv[++index];
+        } else if (!strcmp(argument, "--dump") || !strcmp(argument, "--json") || !strcmp(argument, "--snbt")) {
+            if (index + 1 >= argc) { print_usage(argv[0]); return 1; }
+            CHOOSE_MODE(!strcmp(argument, "--dump") ? MODE_DUMP :
+                        !strcmp(argument, "--json") ? MODE_JSON : MODE_SNBT);
+            result_path = argv[++index];
+        } else if (!strcmp(argument, "--list-chunks")) {
+            CHOOSE_MODE(MODE_LIST_CHUNKS);
+        } else if (!strcmp(argument, "--validate")) {
+            CHOOSE_MODE(MODE_VALIDATE);
+        } else if (!strcmp(argument, "--output")) {
+            if (index + 1 >= argc) { print_usage(argv[0]); return 1; }
+            output_path = argv[++index];
+        } else if (!strcmp(argument, "--in-place")) {
             in_place = 1;
-            continue;
-        }
-
-        if (strcmp(arg, "--backup") == 0) {
+        } else if (!strcmp(argument, "--backup")) {
             backup_enabled = 1;
-            if (i + 1 < argc && argv[i + 1][0] != '-') {
-                backup_suffix = argv[++i];
-            }
-            continue;
-        }
-
-        if (strncmp(arg, "--backup=", 9) == 0) {
+            if (index + 1 < argc && argv[index + 1][0] != '-') backup_suffix = argv[++index];
+        } else if (!strncmp(argument, "--backup=", 9)) {
             backup_enabled = 1;
-            backup_suffix = arg + 9;
-            if (backup_suffix[0] == '\0') {
-                fprintf(stderr, "Invalid --backup suffix\n");
+            backup_suffix = argument + 9;
+            if (!*backup_suffix) { fprintf(stderr, "Backup suffix cannot be empty\n"); return 1; }
+        } else if (!strcmp(argument, "--chunk")) {
+            int x;
+            int z;
+            if (load_options.has_chunk_coords || index + 2 >= argc ||
+                !parse_int_arg(argv[++index], &x) || !parse_int_arg(argv[++index], &z) ||
+                x < 0 || x > 31 || z < 0 || z > 31) {
+                fprintf(stderr, "--chunk expects two coordinates in the range 0..31\n");
                 return 1;
             }
-            continue;
+            load_options.has_chunk_coords = 1;
+            load_options.chunk_x = x;
+            load_options.chunk_z = z;
+        } else if (!strcmp(argument, "--format")) {
+            if (index + 1 >= argc || !parse_input_mode(argv[++index], &input_mode)) {
+                fprintf(stderr, "Unknown --format\n");
+                return 1;
+            }
+        } else if (!strcmp(argument, "--help") || !strcmp(argument, "-h")) {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", argument);
+            return 1;
         }
+    }
+#undef CHOOSE_MODE
 
-        if (strcmp(arg, "--chunk") == 0) {
-            int chunk_x = 0;
-            int chunk_z = 0;
-            if (load_opts.has_chunk_coords || i + 2 >= argc) {
-                print_usage(argv[0]);
-                return 1;
-            }
-            if (!parse_int_arg(argv[++i], &chunk_x) || !parse_int_arg(argv[++i], &chunk_z)) {
-                fprintf(stderr, "Invalid --chunk coordinates (expected integers)\n");
-                return 1;
-            }
-            if (chunk_x < 0 || chunk_x > 31 || chunk_z < 0 || chunk_z > 31) {
-                fprintf(stderr, "--chunk coordinates must be in range 0..31\n");
-                return 1;
-            }
-            load_opts.has_chunk_coords = 1;
-            load_opts.chunk_x = chunk_x;
-            load_opts.chunk_z = chunk_z;
-            continue;
+    if (!is_mutation(mode) && (output_path || in_place || backup_enabled)) {
+        fprintf(stderr, "Save options require an edit operation\n");
+        return 1;
+    }
+    if (output_path && in_place) { fprintf(stderr, "Use --output or --in-place, not both\n"); return 1; }
+    if (backup_enabled && !in_place) { fprintf(stderr, "--backup requires --in-place\n"); return 1; }
+    if (mode == MODE_LIST_CHUNKS) {
+        if (!region_path_has_extension(input_path)) {
+            fprintf(stderr, "--list-chunks requires a .mca or .mcr file\n");
+            return 1;
         }
-
-        print_usage(argv[0]);
-        return 1;
+        if (!cli_list_region_chunks(input_path, error, sizeof(error))) {
+            fprintf(stderr, "Failed to list chunks: %s\n", error);
+            return 1;
+        }
+        return 0;
     }
 
-    if (mode != MODE_EDIT && mode != MODE_SET && mode != MODE_DELETE && (output_path || in_place || backup_enabled)) {
-        fprintf(stderr, "--output/--in-place/--backup are only valid with --edit/--set/--delete\n");
-        return 1;
+    source_is_snbt = input_mode == INPUT_SNBT ||
+        (input_mode == INPUT_AUTO && has_extension(input_path, ".snbt"));
+    started = clock();
+    if (source_is_snbt) {
+        data = cli_read_file(input_path, &data_size, error, sizeof(error));
+        if (data) root = snbt_parse((const char*)data, "", error, sizeof(error));
+        load_info.input_format = NBT_INPUT_FORMAT_RAW;
+        load_info.source_type = NBT_SOURCE_STANDALONE;
+    } else {
+        NBTBinaryFormat requested = NBT_BINARY_AUTO;
+        data = load_nbt_data(input_path, &data_size, &load_options, &load_info, error, sizeof(error));
+        if (load_info.source_type == NBT_SOURCE_REGION_CHUNK) {
+            if (input_mode != INPUT_AUTO && input_mode != INPUT_JAVA) {
+                fprintf(stderr, "Region chunks require Java NBT encoding\n");
+                goto done;
+            }
+            requested = NBT_BINARY_JAVA;
+        } else if (input_mode == INPUT_JAVA) requested = NBT_BINARY_JAVA;
+        else if (input_mode == INPUT_BEDROCK) requested = NBT_BINARY_BEDROCK;
+        else if (input_mode == INPUT_BEDROCK_LEVEL) requested = NBT_BINARY_BEDROCK_LEVEL_DAT;
+        if (data) root = nbt_binary_parse(data, data_size, requested, &binary_info, error, sizeof(error));
     }
-
-    if ((mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) && output_path && in_place) {
-        fprintf(stderr, "Use either --output or --in-place, not both\n");
-        return 1;
-    }
-
-    if ((mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) && backup_enabled && !in_place) {
-        fprintf(stderr, "--backup is only valid with --in-place\n");
-        return 1;
-    }
-
-    if ((mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) && backup_enabled && backup_suffix[0] == '\0') {
-        fprintf(stderr, "Backup suffix cannot be empty\n");
-        return 1;
-    }
-
-    if ((mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) &&
-        output_path && has_mca_extension(output_path) && !has_mca_extension(input_path)) {
-        fprintf(stderr, "--output .mca requires .mca input\n");
-        return 1;
-    }
-
-    size_t size;
-    char load_err[256] = {0};
-    NBTLoadInfo load_info;
-    unsigned char* data = load_nbt_data(input_path, &size, &load_opts, &load_info, load_err, sizeof(load_err));
+    elapsed_ms = (double)(clock() - started) * 1000.0 / CLOCKS_PER_SEC;
     if (!data) {
-        fprintf(stderr, "Failed to load file: %s\n", load_err[0] ? load_err : "unknown error");
-        return 1;
+        fprintf(stderr, "Failed to load file: %s\n", *error ? error : "unknown error");
+        goto done;
     }
-
-    if ((mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) &&
-        load_info.source_type == NBT_SOURCE_REGION_CHUNK && in_place && !load_opts.has_chunk_coords) {
-        fprintf(stderr, "--in-place with .mca requires explicit --chunk x z\n");
-        free(data);
-        return 1;
+    if (!root) {
+        fprintf(stderr, "Failed to parse NBT root: %s\n", *error ? error : "invalid data");
+        goto done;
     }
 
     printf("Detected source: %s\n", nbt_source_type_name(load_info.source_type));
-    printf("Detected input format: %s\n", nbt_input_format_name(load_info.input_format));
+    printf("Detected input format: %s\n", source_is_snbt ? "snbt" : nbt_input_format_name(load_info.input_format));
+    printf("Detected NBT encoding: %s\n", source_is_snbt ? "snbt" : nbt_binary_format_name(binary_info.format));
     if (load_info.source_type == NBT_SOURCE_REGION_CHUNK) {
         printf("Using region chunk (%d, %d)\n", load_info.chunk_x, load_info.chunk_z);
     }
-
-    size_t offset = 0;
-    char parse_err[256] = {0};
-
-    struct timespec start, end;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-
-    NBTTag* root = build_nbt_tree(data, size, &offset, parse_err, sizeof(parse_err));
-
-    clock_gettime(CLOCK_MONOTONIC, &end);
-
-    double elapsed_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
-                        (end.tv_nsec - start.tv_nsec) / 1e6;
-
     printf("Parsed in %.2f ms\n", elapsed_ms);
-
-    if (!root) {
-        fprintf(stderr, "Failed to parse NBT root: %s\n", parse_err[0] ? parse_err : "corrupt or truncated input");
-        free(data);
-        return 1;
-    }
-
-    if (offset < size) {
-        fprintf(stderr, "Warning: trailing %zu bytes after parsed root tag\n", size - offset);
-    }
-
     printf("Root tag name: '%s' | type: %d\n", root->name ? root->name : "", root->type);
-    if (root->type == TAG_Compound) {
-        printf("Root has %d children:\n", root->value.compound.count);
-        for (int i = 0; i < root->value.compound.count; i++) {
-            NBTTag* child = root->value.compound.items[i];
-            printf("  - %s (type %d)\n", child->name, child->type);
+
+    if (mode == MODE_VALIDATE) {
+        printf("Valid NBT document\n");
+        exit_code = 0;
+    } else if (mode == MODE_DUMP) {
+        if (cli_dump_tree(result_path, root, error, sizeof(error))) {
+            printf("Dumped parsed NBT to %s\n", result_path);
+            exit_code = 0;
         }
-    }
+    } else if (mode == MODE_JSON) {
+        if (nbt_write_typed_json_file(result_path, root, 1, error, sizeof(error))) {
+            printf("Exported typed JSON to %s\n", result_path);
+            exit_code = 0;
+        }
+    } else if (mode == MODE_SNBT) {
+        if (cli_write_snbt_document(result_path, root, error, sizeof(error))) {
+            printf("Exported SNBT to %s\n", result_path);
+            exit_code = 0;
+        }
+    } else if (is_mutation(mode)) {
+        EditStatus status;
+        const char* operation_name;
+        const char* write_path = output_path ? output_path : in_place ? input_path : "modified_output.dat";
+        int write_region = load_info.source_type == NBT_SOURCE_REGION_CHUNK &&
+            (in_place || (output_path && region_path_has_extension(output_path)));
 
-    if (mode == MODE_EDIT || mode == MODE_SET || mode == MODE_DELETE) {
-        char err[256] = {0};
-        char io_err[256] = {0};
-        char* backup_path = NULL;
-        const char* write_path = "modified_output.dat";
-        const char* op_name = NULL;
-        int write_region = 0;
-        EditStatus st;
-
+        if (load_info.source_type == NBT_SOURCE_REGION_CHUNK && in_place && !load_options.has_chunk_coords) {
+            fprintf(stderr, "--in-place with a region requires explicit --chunk x z\n");
+            goto done;
+        }
+        if (output_path && region_path_has_extension(output_path) &&
+            load_info.source_type != NBT_SOURCE_REGION_CHUNK) {
+            fprintf(stderr, "A region output requires a region input\n");
+            goto done;
+        }
         if (mode == MODE_EDIT) {
-            op_name = "edit";
-            st = edit_tag_by_path(root, op_path, op_value, err, sizeof(err));
+            operation_name = "edit";
+            status = edit_tag_by_path(root, operation_path, operation_value, error, sizeof(error));
         } else if (mode == MODE_SET) {
-            op_name = "set";
-            st = set_tag_by_path(root, op_path, op_value, err, sizeof(err));
+            operation_name = "set";
+            status = set_tag_by_path(root, operation_path, operation_value, error, sizeof(error));
+        } else if (mode == MODE_DELETE) {
+            operation_name = "delete";
+            status = delete_tag_by_path(root, operation_path, error, sizeof(error));
         } else {
-            op_name = "delete";
-            st = delete_tag_by_path(root, op_path, err, sizeof(err));
+            operation_name = "rename";
+            status = rename_tag_by_path(root, operation_path, operation_value, error, sizeof(error));
         }
-
-        if (st != EDIT_OK) {
-            if (err[0] != '\0') {
-                printf("Failed to %s path '%s': %s (%s)\n", op_name, op_path, err, edit_status_name(st));
-            } else {
-                printf("Failed to %s path '%s': %s\n", op_name, op_path, edit_status_name(st));
-            }
-            free(data);
-            free_nbt_tree(root);
-            return 1;
-        }
-
-        if (mode == MODE_DELETE) {
-            printf("Deleted %s successfully\n", op_path);
-        } else if (mode == MODE_SET) {
-            printf("Set %s successfully\n", op_path);
-        } else {
-            printf("Updated %s successfully\n", op_path);
-        }
-
-        if (in_place) {
-            write_path = input_path;
-        } else if (output_path) {
-            write_path = output_path;
-        }
-
-        if (load_info.source_type == NBT_SOURCE_REGION_CHUNK) {
-            if (in_place || (output_path && has_mca_extension(output_path))) {
-                write_region = 1;
-            }
+        if (status != EDIT_OK) {
+            fprintf(stderr, "Failed to %s '%s': %s (%s)\n", operation_name, operation_path,
+                    *error ? error : "unknown error", edit_status_name(status));
+            goto done;
         }
 
         if (in_place && backup_enabled) {
-            backup_path = make_backup_path(input_path, backup_suffix);
-            if (!backup_path) {
-                fprintf(stderr, "Failed to allocate backup path\n");
-                free(data);
-                free_nbt_tree(root);
-                return 1;
-            }
-            if (!copy_file(input_path, backup_path, io_err, sizeof(io_err))) {
-                fprintf(stderr, "Backup creation failed: %s\n", io_err[0] ? io_err : "unknown error");
+            char* backup_path = cli_append_suffix(input_path, backup_suffix);
+            if (!backup_path || !cli_copy_file(input_path, backup_path, error, sizeof(error))) {
+                fprintf(stderr, "Backup creation failed: %s\n", *error ? error : "out of memory");
                 free(backup_path);
-                free(data);
-                free_nbt_tree(root);
-                return 1;
+                goto done;
             }
             printf("Created backup: %s\n", backup_path);
+            free(backup_path);
+            if (region_path_has_extension(input_path) &&
+                !cli_backup_region_sidecars(input_path, backup_suffix, error, sizeof(error))) {
+                fprintf(stderr, "External chunk backup failed: %s\n", error);
+                goto done;
+            }
         }
 
         if (write_region) {
-            RegionFile* region = region_file_read(input_path, io_err, sizeof(io_err));
-            if (!region) {
-                fprintf(stderr, "Failed to load region for save: %s\n", io_err[0] ? io_err : "unknown error");
-                free(backup_path);
-                free(data);
-                free_nbt_tree(root);
-                return 1;
-            }
-
-            if (!region_file_update_chunk_from_nbt(region, load_info.chunk_x, load_info.chunk_z, root, -1, io_err, sizeof(io_err))) {
-                fprintf(stderr, "Failed to update region chunk (%d, %d): %s\n", load_info.chunk_x, load_info.chunk_z, io_err[0] ? io_err : "unknown error");
+            RegionFile* region = region_file_read(input_path, error, sizeof(error));
+            if (!region || !region_file_update_chunk_from_nbt(
+                    region, load_info.chunk_x, load_info.chunk_z, root, -1, error, sizeof(error)) ||
+                !region_file_write_atomic(region, write_path, error, sizeof(error))) {
+                fprintf(stderr, "Failed to save region: %s\n", *error ? error : "unknown error");
                 region_file_free(region);
-                free(backup_path);
-                free(data);
-                free_nbt_tree(root);
-                return 1;
+                goto done;
             }
-
-            if (!region_file_write_atomic(region, write_path, io_err, sizeof(io_err))) {
-                fprintf(stderr, "Failed to save edited region: %s\n", io_err[0] ? io_err : "unknown error");
-                region_file_free(region);
-                free(backup_path);
-                free(data);
-                free_nbt_tree(root);
-                return 1;
-            }
-
             region_file_free(region);
+        } else if (has_extension(write_path, ".snbt") || (source_is_snbt && in_place)) {
+            if (!cli_write_snbt_document(write_path, root, error, sizeof(error))) goto save_error;
         } else {
-            if (!write_nbt_atomically(write_path, root, io_err, sizeof(io_err))) {
-                fprintf(stderr, "Failed to save edited NBT: %s\n", io_err[0] ? io_err : "unknown error");
-                free(backup_path);
-                free(data);
-                free_nbt_tree(root);
-                return 1;
+            NBTInputFormat compression = source_is_snbt || load_info.source_type == NBT_SOURCE_REGION_CHUNK
+                ? NBT_INPUT_FORMAT_GZIP : load_info.input_format;
+            NBTBinaryInfo output_info = binary_info;
+            if (source_is_snbt || load_info.source_type == NBT_SOURCE_REGION_CHUNK) {
+                memset(&output_info, 0, sizeof(output_info));
+                output_info.format = NBT_BINARY_JAVA;
             }
+            if (!cli_write_binary_document(
+                    write_path, root, &output_info, compression, error, sizeof(error))) goto save_error;
         }
-
         printf("Saved modified NBT to %s\n", write_path);
-        free(backup_path);
+        exit_code = 0;
+        goto done;
 
-    } else if (mode == MODE_DUMP) {
-        // DUMP MODE
-        FILE* dump_file = fopen(dump_path, "w");
-        if (!dump_file) {
-            perror("fopen");
-            free(data);
-            free_nbt_tree(root);
-            return 1;
-        }
-
-        fflush(stdout);
-        int stdout_fd = dup(fileno(stdout));
-        if (stdout_fd < 0) {
-            perror("dup");
-            fclose(dump_file);
-            free(data);
-            free_nbt_tree(root);
-            return 1;
-        }
-
-        if (dup2(fileno(dump_file), fileno(stdout)) < 0) {
-            perror("dup2");
-            close(stdout_fd);
-            fclose(dump_file);
-            free(data);
-            free_nbt_tree(root);
-            return 1;
-        }
-
-        parse_nbt(root, 0); // Write parsed tree into the dump file
-
-        fflush(stdout);
-        if (dup2(stdout_fd, fileno(stdout)) < 0) {
-            perror("dup2");
-            close(stdout_fd);
-            fclose(dump_file);
-            free(data);
-            free_nbt_tree(root);
-            return 1;
-        }
-        close(stdout_fd);
-        fclose(dump_file);
-
-        printf("Dumped parsed NBT to %s\n", dump_path);
-
+save_error:
+        fprintf(stderr, "Failed to save NBT: %s\n", *error ? error : "unknown error");
     } else {
-        // DEFAULT MODE (print to terminal)
         parse_nbt(root, 0);
         printf("Parsed and printed in %.2f ms\n", elapsed_ms);
+        exit_code = 0;
     }
 
+    if (exit_code && *error && mode != MODE_PRINT && !is_mutation(mode)) {
+        fprintf(stderr, "Operation failed: %s\n", error);
+    }
+
+done:
     free(data);
     free_nbt_tree(root);
-    return 0;
+    return exit_code;
 }

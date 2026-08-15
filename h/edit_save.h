@@ -22,6 +22,7 @@ int serialize_tag_to_nbt_bytes(const NBTTag* tag, unsigned char** out_data, size
 EditStatus edit_tag_by_path(NBTTag* root, const char* path, const char* value_expr, char* err, size_t err_sz);
 EditStatus set_tag_by_path(NBTTag* root, const char* path, const char* value_expr, char* err, size_t err_sz);
 EditStatus delete_tag_by_path(NBTTag* root, const char* path, char* err, size_t err_sz);
+EditStatus rename_tag_by_path(NBTTag* root, const char* path, const char* new_name, char* err, size_t err_sz);
 const char* edit_status_name(EditStatus status);
 
 /* Backward-compat utility: returns only direct tag targets. */

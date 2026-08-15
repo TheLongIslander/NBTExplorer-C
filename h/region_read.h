@@ -2,7 +2,7 @@
 #define REGION_READ_H
 
 #include <stddef.h>
-#include "io.h"
+#include "nbt_io.h"
 #include "region_file.h"
 
 RegionFile* region_file_read(const char* filename, char* err, size_t err_sz);

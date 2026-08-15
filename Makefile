@@ -1,6 +1,23 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -g -Ih
-LDFLAGS = -lz
+CC ?= cc
+CPPFLAGS ?= -Ih
+CFLAGS ?= -O2 -g
+CFLAGS += -Wall -Wextra -Wpedantic
+LDFLAGS ?=
+LDLIBS ?= -lz
+
+# dlopen() is part of libSystem on macOS and the Windows API on Windows, but
+# older glibc-based Linux systems still require an explicit libdl dependency.
+ifeq ($(shell uname -s 2>/dev/null),Linux)
+LDLIBS += -ldl
+endif
+ifeq ($(shell uname -s 2>/dev/null),Darwin)
+MACOS_SDK_PATH := $(shell xcrun --sdk macosx --show-sdk-path 2>/dev/null)
+ifneq ($(MACOS_SDK_PATH),)
+# Keep an Intel Homebrew zlib in /usr/local from shadowing the active SDK's
+# system zlib when producing a native Apple silicon binary (and vice versa).
+LDFLAGS += -L$(MACOS_SDK_PATH)/usr/lib
+endif
+endif
 
 SRC_DIR = src
 BIN_DIR = bin
@@ -10,27 +27,38 @@ SRC = $(wildcard $(SRC_DIR)/*.c)
 OBJ = $(SRC:$(SRC_DIR)/%.c=$(BIN_DIR)/%.o)
 ASM = $(SRC:$(SRC_DIR)/%.c=$(BIN_DIR)/%.s)
 
-EXE = $(BIN_DIR)/nbt_explorer
+EXEEXT :=
+ifeq ($(OS),Windows_NT)
+EXEEXT := .exe
+endif
+
+EXE = $(BIN_DIR)/nbt_explorer$(EXEEXT)
 
 all: $(EXE)
 
 $(EXE): $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 # Object file rule
-$(BIN_DIR)/%.o: $(SRC_DIR)/%.c
-	$(CC) $(CFLAGS) -c $< -o $@
+$(BIN_DIR)/%.o: $(SRC_DIR)/%.c | $(BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BIN_DIR):
+	mkdir -p $@
 
 # Assembly generation
 asm: $(ASM)
 
-$(BIN_DIR)/%.s: $(SRC_DIR)/%.c
-	$(CC) $(CFLAGS) -S $< -o $@
+$(BIN_DIR)/%.s: $(SRC_DIR)/%.c | $(BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -S $< -o $@
 
 test: $(EXE)
 	bash ./tests/run_edit_tests.sh
 	bash ./tests/run_format_tests.sh
 	bash ./tests/run_region_tests.sh
+	bash ./tests/run_modern_region_tests.sh
+	bash ./tests/run_cubic_region_tests.sh
+	sh ./tests/run_extended_formats_tests.sh
 	bash ./tests/run_corruption_tests.sh
 
 fuzz: $(EXE)

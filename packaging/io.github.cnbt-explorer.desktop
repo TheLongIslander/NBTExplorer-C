@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=C-NBT Explorer
+Comment=Inspect and edit Minecraft NBT data
+Exec=cnbt-explorer %F
+Icon=io.github.cnbt-explorer
+Terminal=false
+Categories=Utility;Development;
+MimeType=application/x-minecraft-nbt;
+StartupNotify=true

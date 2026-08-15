@@ -1,5 +1,5 @@
-#ifndef IO_H
-#define IO_H
+#ifndef NBT_EXPLORER_IO_H
+#define NBT_EXPLORER_IO_H
 
 #include <stddef.h>
 
@@ -7,7 +7,8 @@ typedef enum {
     NBT_INPUT_FORMAT_UNKNOWN = 0,
     NBT_INPUT_FORMAT_GZIP,
     NBT_INPUT_FORMAT_ZLIB,
-    NBT_INPUT_FORMAT_RAW
+    NBT_INPUT_FORMAT_RAW,
+    NBT_INPUT_FORMAT_LZ4
 } NBTInputFormat;
 
 typedef enum {

@@ -5,7 +5,8 @@
 #include <limits.h>
 #include <errno.h>
 #include <zlib.h>
-#include "io.h"
+#include "nbt_io.h"
+#include "platform.h"
 #include "region_read.h"
 
 #define CHUNK 16384
@@ -17,7 +18,7 @@ static void set_err(char* err, size_t err_sz, const char* msg) {
 }
 
 static unsigned char* read_file_bytes(const char* filename, size_t* out_size, char* err, size_t err_sz) {
-    FILE* file = fopen(filename, "rb");
+    FILE* file = nbt_fopen(filename, "rb");
     unsigned char* buffer = NULL;
     size_t size = 0;
     size_t capacity = 0;
@@ -182,18 +183,6 @@ static unsigned char* copy_bytes(const unsigned char* data, size_t size) {
     return out;
 }
 
-static int has_mca_extension(const char* filename) {
-    const char* dot;
-
-    if (!filename) return 0;
-    dot = strrchr(filename, '.');
-    if (!dot) return 0;
-    return (dot[1] == 'm' || dot[1] == 'M') &&
-           (dot[2] == 'c' || dot[2] == 'C') &&
-           (dot[3] == 'a' || dot[3] == 'A') &&
-           dot[4] == '\0';
-}
-
 static unsigned char* decode_nbt_payload(
     const unsigned char* input,
     size_t input_size,
@@ -273,7 +262,7 @@ static unsigned char* load_nbt_from_region_file(
         chunk_z = opts->chunk_z;
     } else {
         if (!region_file_find_first_populated_chunk(region, &chunk_x, &chunk_z)) {
-            set_err(err, err_sz, "no populated chunks found in .mca file");
+            set_err(err, err_sz, "no populated chunks found in region file");
             region_file_free(region);
             return NULL;
         }
@@ -313,12 +302,12 @@ unsigned char* load_nbt_data(const char* filename, size_t* out_size, const NBTLo
         return NULL;
     }
 
-    if (has_mca_extension(filename)) {
+    if (region_path_has_extension(filename)) {
         return load_nbt_from_region_file(filename, out_size, opts, out_info, err, err_sz);
     }
 
     if (opts && opts->has_chunk_coords) {
-        set_err(err, err_sz, "--chunk is only valid with .mca region files");
+        set_err(err, err_sz, "--chunk is only valid with .mca/.mcr region files");
         return NULL;
     }
 
@@ -349,6 +338,8 @@ const char* nbt_input_format_name(NBTInputFormat fmt) {
             return "zlib";
         case NBT_INPUT_FORMAT_RAW:
             return "raw";
+        case NBT_INPUT_FORMAT_LZ4:
+            return "lz4";
         default:
             return "unknown";
     }

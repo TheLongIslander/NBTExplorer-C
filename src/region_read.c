@@ -4,7 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
+#include "platform.h"
 #include "region_read.h"
+#include "region_lz4.h"
 
 #define READ_CHUNK 16384U
 
@@ -29,7 +31,7 @@ static unsigned char* read_file_bytes(const char* filename, size_t* out_size, ch
 
     if (out_size) *out_size = 0;
 
-    file = fopen(filename, "rb");
+    file = nbt_fopen(filename, "rb");
     if (!file) {
         if (err && err_sz > 0) {
             snprintf(err, err_sz, "fopen(%s) failed: %s", filename, strerror(errno));
@@ -183,14 +185,14 @@ static int mark_sector_usage(RegionFile* region, uint32_t start_sector, uint32_t
     }
 
     if (start_sector >= region->total_sectors || sector_count > region->total_sectors - start_sector) {
-        set_err(err, err_sz, "corrupt .mca: sector range out of bounds");
+        set_err(err, err_sz, "corrupt region file: sector range out of bounds");
         return 0;
     }
 
     for (s = 0; s < sector_count; s++) {
         uint32_t idx = start_sector + s;
         if (region->sector_used[idx]) {
-            set_err(err, err_sz, "corrupt .mca: overlapping chunk sector allocation");
+            set_err(err, err_sz, "corrupt region file: overlapping chunk sector allocation");
             return 0;
         }
         region->sector_used[idx] = 1;
@@ -202,7 +204,10 @@ static int mark_sector_usage(RegionFile* region, uint32_t start_sector, uint32_t
 RegionFile* region_file_read(const char* filename, char* err, size_t err_sz) {
     unsigned char* file_data = NULL;
     size_t file_size = 0;
+    size_t total_sectors;
     RegionFile* region = NULL;
+    uint32_t sector_bytes;
+    uint32_t header_sectors;
     int i;
 
     if (!filename) {
@@ -216,7 +221,7 @@ RegionFile* region_file_read(const char* filename, char* err, size_t err_sz) {
     }
 
     if (file_size < REGION_HEADER_BYTES) {
-        set_err(err, err_sz, "invalid .mca: expected at least 8192 bytes");
+        set_err(err, err_sz, "invalid region file: expected at least 8192 bytes");
         free(file_data);
         return NULL;
     }
@@ -228,10 +233,22 @@ RegionFile* region_file_read(const char* filename, char* err, size_t err_sz) {
         return NULL;
     }
 
+    region->layout = region_path_is_cubic_r2(filename)
+        ? REGION_LAYOUT_CUBIC_R2
+        : REGION_LAYOUT_STANDARD;
+    sector_bytes = region_file_sector_bytes(region);
+    header_sectors = region_file_header_sectors(region);
     region->file_size = file_size;
-    region->total_sectors = (uint32_t)((file_size + (REGION_SECTOR_BYTES - 1U)) / REGION_SECTOR_BYTES);
-    if (region->total_sectors < 2U) {
-        set_err(err, err_sz, "invalid .mca: missing header sectors");
+    total_sectors = file_size / sector_bytes + ((file_size % sector_bytes) != 0U);
+    if (total_sectors > UINT32_MAX) {
+        set_err(err, err_sz, "invalid region file: sector count exceeds supported limit");
+        free(file_data);
+        region_file_free(region);
+        return NULL;
+    }
+    region->total_sectors = (uint32_t)total_sectors;
+    if (region->total_sectors < header_sectors) {
+        set_err(err, err_sz, "invalid region file: missing header sectors");
         free(file_data);
         region_file_free(region);
         return NULL;
@@ -245,13 +262,14 @@ RegionFile* region_file_read(const char* filename, char* err, size_t err_sz) {
         return NULL;
     }
 
-    region->sector_used[0] = 1;
-    region->sector_used[1] = 1;
+    for (i = 0; (uint32_t)i < header_sectors; i++) {
+        region->sector_used[i] = 1;
+    }
 
     for (i = 0; i < REGION_CHUNK_COUNT; i++) {
         RegionChunkSlot* slot = &region->chunks[i];
         uint32_t location_entry = read_be_u32(file_data + (size_t)i * 4U);
-        uint32_t timestamp = read_be_u32(file_data + REGION_SECTOR_BYTES + (size_t)i * 4U);
+        uint32_t timestamp = read_be_u32(file_data + REGION_LOCATION_TABLE_BYTES + (size_t)i * 4U);
         uint32_t sector_offset = (location_entry >> 8) & 0x00FFFFFFU;
         uint32_t sector_count = location_entry & 0x000000FFU;
 
@@ -262,14 +280,14 @@ RegionFile* region_file_read(const char* filename, char* err, size_t err_sz) {
         }
 
         if (sector_offset == 0 || sector_count == 0) {
-            set_err(err, err_sz, "corrupt .mca: invalid zero location/count combination");
+            set_err(err, err_sz, "corrupt region file: invalid zero location/count combination");
             free(file_data);
             region_file_free(region);
             return NULL;
         }
 
-        if (sector_offset < 2U) {
-            set_err(err, err_sz, "corrupt .mca: chunk points into header sectors");
+        if (sector_offset < header_sectors) {
+            set_err(err, err_sz, "corrupt region file: chunk points into header sectors");
             free(file_data);
             region_file_free(region);
             return NULL;
@@ -282,21 +300,23 @@ RegionFile* region_file_read(const char* filename, char* err, size_t err_sz) {
         }
 
         {
-            size_t chunk_start = (size_t)sector_offset * REGION_SECTOR_BYTES;
-            size_t chunk_span = (size_t)sector_count * REGION_SECTOR_BYTES;
+            size_t chunk_start = (size_t)sector_offset * sector_bytes;
+            size_t chunk_span = (size_t)sector_count * sector_bytes;
             uint32_t length_field;
+            uint8_t compression_flags;
             uint8_t compression_type;
+            int external;
             size_t payload_size;
 
             if (chunk_start > file_size || chunk_span > file_size - chunk_start) {
-                set_err(err, err_sz, "corrupt .mca: chunk data points outside file");
+                set_err(err, err_sz, "corrupt region file: chunk data points outside file");
                 free(file_data);
                 region_file_free(region);
                 return NULL;
             }
 
             if (chunk_span < 5U) {
-                set_err(err, err_sz, "corrupt .mca: chunk data block too small");
+                set_err(err, err_sz, "corrupt region file: chunk data block too small");
                 free(file_data);
                 region_file_free(region);
                 return NULL;
@@ -304,24 +324,27 @@ RegionFile* region_file_read(const char* filename, char* err, size_t err_sz) {
 
             length_field = read_be_u32(file_data + chunk_start);
             if (length_field < 1U) {
-                set_err(err, err_sz, "corrupt .mca: invalid chunk length field");
+                set_err(err, err_sz, "corrupt region file: invalid chunk length field");
                 free(file_data);
                 region_file_free(region);
                 return NULL;
             }
 
             if ((size_t)length_field + 4U > chunk_span) {
-                set_err(err, err_sz, "corrupt .mca: chunk length exceeds allocated sectors");
+                set_err(err, err_sz, "corrupt region file: chunk length exceeds allocated sectors");
                 free(file_data);
                 region_file_free(region);
                 return NULL;
             }
 
-            compression_type = file_data[chunk_start + 4U];
+            compression_flags = file_data[chunk_start + 4U];
+            external = (compression_flags & REGION_EXTERNAL_STREAM_FLAG) != 0;
+            compression_type = compression_flags & (uint8_t)~REGION_EXTERNAL_STREAM_FLAG;
             if (compression_type != REGION_COMPRESSION_GZIP &&
                 compression_type != REGION_COMPRESSION_ZLIB &&
-                compression_type != REGION_COMPRESSION_NONE) {
-                set_err(err, err_sz, "corrupt .mca: unsupported chunk compression type");
+                compression_type != REGION_COMPRESSION_NONE &&
+                compression_type != REGION_COMPRESSION_LZ4) {
+                set_err(err, err_sz, "corrupt region file: unsupported chunk compression type");
                 free(file_data);
                 region_file_free(region);
                 return NULL;
@@ -329,24 +352,58 @@ RegionFile* region_file_read(const char* filename, char* err, size_t err_sz) {
 
             payload_size = (size_t)length_field - 1U;
             if (payload_size > chunk_span - 5U) {
-                set_err(err, err_sz, "corrupt .mca: invalid chunk payload size");
+                set_err(err, err_sz, "corrupt region file: invalid chunk payload size");
                 free(file_data);
                 region_file_free(region);
                 return NULL;
             }
 
-            slot->payload = copy_bytes(file_data + chunk_start + 5U, payload_size);
-            if (!slot->payload && payload_size > 0) {
-                set_err(err, err_sz, "out of memory");
-                free(file_data);
-                region_file_free(region);
-                return NULL;
+            if (external) {
+                char* external_path;
+
+                if (length_field != 1U) {
+                    set_err(err, err_sz, "corrupt region file: external chunk stub must have length 1");
+                    free(file_data);
+                    region_file_free(region);
+                    return NULL;
+                }
+
+                if (region->layout == REGION_LAYOUT_CUBIC_R2) {
+                    set_err(err, err_sz, "corrupt cubic r2 region: external chunk storage is not defined");
+                    free(file_data);
+                    region_file_free(region);
+                    return NULL;
+                }
+
+                external_path = region_external_chunk_path(filename, i % REGION_CHUNK_GRID, i / REGION_CHUNK_GRID);
+                if (!external_path) {
+                    set_err(err, err_sz, "external chunk requires a conventional r.<x>.<z>.mca/.mcr filename");
+                    free(file_data);
+                    region_file_free(region);
+                    return NULL;
+                }
+                slot->payload = read_file_bytes(external_path, &payload_size, err, err_sz);
+                free(external_path);
+                if (!slot->payload) {
+                    free(file_data);
+                    region_file_free(region);
+                    return NULL;
+                }
+            } else {
+                slot->payload = copy_bytes(file_data + chunk_start + 5U, payload_size);
+                if (!slot->payload && payload_size > 0) {
+                    set_err(err, err_sz, "out of memory");
+                    free(file_data);
+                    region_file_free(region);
+                    return NULL;
+                }
             }
 
             slot->present = 1;
             slot->sector_offset = sector_offset;
             slot->sector_count = (uint8_t)sector_count;
             slot->compression_type = compression_type;
+            slot->external = external;
             slot->stored_length = length_field;
             slot->payload_size = payload_size;
         }
@@ -408,7 +465,7 @@ unsigned char* region_file_extract_chunk_nbt(
         case REGION_COMPRESSION_GZIP:
             decoded = inflate_buffer(slot->payload, slot->payload_size, 16 + MAX_WBITS, &decoded_size);
             if (!decoded) {
-                set_err(err, err_sz, "failed to decompress gzip .mca chunk payload");
+                set_err(err, err_sz, "failed to decompress gzip region chunk payload");
                 return NULL;
             }
             if (out_format) *out_format = NBT_INPUT_FORMAT_GZIP;
@@ -416,7 +473,7 @@ unsigned char* region_file_extract_chunk_nbt(
         case REGION_COMPRESSION_ZLIB:
             decoded = inflate_buffer(slot->payload, slot->payload_size, MAX_WBITS, &decoded_size);
             if (!decoded) {
-                set_err(err, err_sz, "failed to decompress zlib .mca chunk payload");
+                set_err(err, err_sz, "failed to decompress zlib region chunk payload");
                 return NULL;
             }
             if (out_format) *out_format = NBT_INPUT_FORMAT_ZLIB;
@@ -430,8 +487,13 @@ unsigned char* region_file_extract_chunk_nbt(
             decoded_size = slot->payload_size;
             if (out_format) *out_format = NBT_INPUT_FORMAT_RAW;
             break;
+        case REGION_COMPRESSION_LZ4:
+            decoded = region_lz4_decode(slot->payload, slot->payload_size, &decoded_size, err, err_sz);
+            if (!decoded) return NULL;
+            if (out_format) *out_format = NBT_INPUT_FORMAT_LZ4;
+            break;
         default:
-            set_err(err, err_sz, "unsupported .mca chunk compression type");
+            set_err(err, err_sz, "unsupported region chunk compression type");
             return NULL;
     }
 

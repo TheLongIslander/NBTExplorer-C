@@ -1,0 +1,96 @@
+name: Native desktop packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: ${{ matrix.os }} desktop package
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux packaging prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libgl1-mesa-dev \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-render-util0 \
+            libxcb-xinerama0
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
+        with:
+          version: "6.9.*"
+          cache: true
+
+      - name: Configure desktop application
+        if: runner.os != 'macOS'
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DNBT_EXPLORER_BUILD_DESKTOP=ON
+
+      - name: Configure universal macOS application
+        if: runner.os == 'macOS'
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DNBT_EXPLORER_BUILD_DESKTOP=ON
+          "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+
+      - name: Build desktop application
+        run: cmake --build build --config Release --parallel
+
+      - name: Run smoke tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Build AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: ./packaging/build-appimage.sh "$PWD/build" "$PWD/dist"
+
+      - name: Build macOS DMG
+        if: runner.os == 'macOS'
+        run: cpack --config build/CPackConfig.cmake -G DragNDrop -C Release -B dist
+
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        run: choco install nsis --no-progress --yes
+
+      - name: Build Windows portable ZIP
+        if: runner.os == 'Windows'
+        run: cpack --config build/CPackConfig.cmake -G ZIP -C Release -B dist
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        run: cpack --config build/CPackConfig.cmake -G NSIS -C Release -B dist
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: C-NBT-Explorer-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error

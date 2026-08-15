@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-minecraft-nbt">
+    <comment>Minecraft NBT data</comment>
+    <glob pattern="*.nbt" weight="80"/>
+    <glob pattern="*.mca" weight="80"/>
+    <glob pattern="*.mcr" weight="80"/>
+    <glob pattern="*.snbt" weight="80"/>
+    <glob pattern="*.schematic" weight="80"/>
+    <glob pattern="*.schem" weight="80"/>
+    <glob pattern="*.litematic" weight="80"/>
+    <glob pattern="*.mcstructure" weight="80"/>
+    <glob pattern="*.dat_old" weight="80"/>
+    <!-- .dat is generic, so keep its match below application-specific types. -->
+    <glob pattern="*.dat" weight="10"/>
+  </mime-type>
+</mime-info>
